@@ -25,6 +25,8 @@ export function MaquinaForm() {
     percentualComissao: "",
     localizacao: "",
     ativo: true,
+    machinePayPosId: "",
+    machinePayUsrId: "",
   });
 
   const [lojas, setLojas] = useState([]);
@@ -32,6 +34,7 @@ export function MaquinaForm() {
   const [loadingData, setLoadingData] = useState(true);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
+  const [mostrarAvancado, setMostrarAvancado] = useState(false);
 
   useEffect(() => {
     carregarLojas();
@@ -75,7 +78,12 @@ export function MaquinaForm() {
         localizacao: response.data.localizacao || "",
 
         ativo: response.data.ativo !== undefined ? response.data.ativo : true,
+        machinePayPosId: response.data.machinePayPosId || "",
+        machinePayUsrId: response.data.machinePayUsrId || "",
       });
+      if (response.data.machinePayUsrId) {
+        setMostrarAvancado(true);
+      }
     } catch (error) {
       setError(
         "Erro ao carregar máquina: " +
@@ -138,6 +146,8 @@ export function MaquinaForm() {
         percentualComissao: parseFloat(formData.percentualComissao) || 0,
         localizacao: formData.localizacao?.trim() || null,
         ativo: formData.ativo,
+        machinePayPosId: formData.machinePayPosId?.trim() || null,
+        machinePayUsrId: formData.machinePayUsrId?.trim() || null,
       };
 
       console.log("Dados enviados:", JSON.stringify(data, null, 2)); // Debug detalhado
@@ -470,6 +480,61 @@ export function MaquinaForm() {
                   </p>
                 </div>
               </div>
+            </div>
+
+            {/* Machine Pay */}
+            <div>
+              <h3 className="text-lg font-bold text-gray-900 mb-4 flex items-center gap-2">
+                💳 Machine Pay
+              </h3>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-2">
+                    ID da Machine Pay (POS)
+                  </label>
+                  <input
+                    type="text"
+                    name="machinePayPosId"
+                    value={formData.machinePayPosId}
+                    onChange={handleChange}
+                    className="input-field"
+                    placeholder="Ex: 123456"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    Identificador do leitor PIX/cartão vinculado a esta máquina no painel Machine Pay (opcional)
+                  </p>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setMostrarAvancado(!mostrarAvancado)}
+                className="text-sm text-primary font-semibold mt-4 hover:underline"
+              >
+                {mostrarAvancado ? "▲ Ocultar opções avançadas" : "▼ Mostrar opções avançadas"}
+              </button>
+
+              {mostrarAvancado && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+                  <div>
+                    <label className="block text-sm font-semibold text-gray-700 mb-2">
+                      ID de usuário Machine Pay
+                    </label>
+                    <input
+                      type="text"
+                      name="machinePayUsrId"
+                      value={formData.machinePayUsrId}
+                      onChange={handleChange}
+                      className="input-field"
+                      placeholder="Deixe em branco para descoberta automática"
+                    />
+                    <p className="text-xs text-gray-500 mt-1">
+                      Na maioria dos casos não precisa preencher, o sistema tenta descobrir sozinho
+                    </p>
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Botões */}

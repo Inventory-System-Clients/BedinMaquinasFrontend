@@ -669,7 +669,7 @@ export function Relatorios() {
                     mov.valorEntradaFichas ?? mov.valor_entrada_fichas,
                   );
                   const totalFinanceiro = obterTotalFinanceiroMovimentacao(mov);
-                  const numeroBag = String(mov.numeroBag || "").trim();
+                  const numeroSacola = String(mov.numeroSacola || "").trim();
 
                   return {
                     ...mov,
@@ -677,9 +677,8 @@ export function Relatorios() {
                     valorEntradaCartaoNormalizado: cartao,
                     valorEntradaFichasNormalizado: fichas,
                     valorFinanceiroTotal: totalFinanceiro,
-                    numeroBagNormalizado: numeroBag,
-                    financeiroPendente:
-                      Boolean(numeroBag) && totalFinanceiro <= 0,
+                    numeroSacolaNormalizado: numeroSacola,
+                    financeiroPendente: mov.statusFinanceiro === "pendente",
                   };
                 });
 
@@ -1867,9 +1866,9 @@ export function Relatorios() {
                                       : "Data não informada"}
                                   </div>
                                   <div className="text-xs sm:text-sm font-semibold text-gray-700">
-                                    {mov.numeroBagNormalizado
-                                      ? `Bag: ${mov.numeroBagNormalizado}`
-                                      : "Sem bag"}
+                                    {mov.numeroSacolaNormalizado
+                                      ? `Sacola: ${mov.numeroSacolaNormalizado}`
+                                      : "Sem sacola"}
                                   </div>
                                 </div>
 

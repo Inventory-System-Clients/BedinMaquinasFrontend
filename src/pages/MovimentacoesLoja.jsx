@@ -12,21 +12,6 @@ import {
   validarInconsistenciasMovimentacao,
 } from "../utils/movimentacaoInconsistencias";
 
-const NUMEROS_BAG_BLOQUEADOS = new Set([
-  "0",
-  "00",
-  "1",
-  "2",
-  "3",
-  "4",
-  "01",
-  "02",
-  "03",
-  "04",
-]);
-const numeroBagBloqueado = (numeroBag = "") =>
-  NUMEROS_BAG_BLOQUEADOS.has(numeroBag.trim());
-
 const toNumberOrNull = (value) => {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
@@ -118,7 +103,7 @@ export function MovimentacoesLoja() {
     contadorIn: "",
     contadorOut: "",
     valor_entrada_maquininha_pix: "",
-    numeroBag: "",
+    numeroSacola: "",
     valorEntradaNotas: "",
     valorEntradaCartao: "",
     observacao: "",
@@ -323,18 +308,7 @@ export function MovimentacoesLoja() {
       setError("Selecione um produto para registrar a movimentação.");
       return;
     }
-    const numeroBagInformado = formData.numeroBag?.trim() || "";
-
-    if (!numeroBagInformado) {
-      setError("Informe o número de bag para prosseguir.");
-      return;
-    }
-    if (numeroBagBloqueado(numeroBagInformado)) {
-      setError(
-        "Os números 00, 01, 02, 03, 04 (e 0, 1, 2, 3, 4) são bloqueados para BAG. Informe outro número para lançar a movimentação.",
-      );
-      return;
-    }
+    const numeroSacolaInformado = formData.numeroSacola?.trim() || "";
 
     try {
       setSalvando(true);
@@ -352,7 +326,7 @@ export function MovimentacoesLoja() {
         quantidade_notas_entrada: 0,
         valor_entrada_maquininha_pix:
           parseFloat(formData.valor_entrada_maquininha_pix) || 0,
-        numeroBag: numeroBagInformado,
+        numeroSacola: numeroSacolaInformado || null,
         valorEntradaNotas: formData.valorEntradaNotas
           ? parseFloat(formData.valorEntradaNotas)
           : null,
@@ -498,7 +472,6 @@ export function MovimentacoesLoja() {
   // Bloqueio de movimentação em outras lojas - baseado no backend
   const bloqueadoPorOutraLoja = lojaComMovimentacao !== null;
   const lojaEmAtendimento = lojaTemMovimentacaoReal(loja, roteiro?.lojas || []);
-  const bagInvalida = numeroBagBloqueado(formData.numeroBag);
 
   if (loading) return <PageLoader />;
 
@@ -792,42 +765,30 @@ export function MovimentacoesLoja() {
                     />
                   </div>
 
-                  {/* Número da Bag */}
+                  {/* Número da Sacola */}
                   <div className="md:col-span-2">
                     <label className="block text-sm font-semibold text-gray-700 mb-2">
-                      🎒 Número da Bag (opcional)
+                      🎒 Número da Sacola (opcional)
                     </label>
                     <input
                       type="text"
-                      value={formData.numeroBag}
+                      value={formData.numeroSacola}
                       onChange={(e) =>
                         setFormData({
                           ...formData,
-                          numeroBag: e.target.value,
+                          numeroSacola: e.target.value,
                         })
                       }
                       className="input-field"
-                      placeholder="Preencha se levar dinheiro na bag para contar depois"
+                      placeholder="Opcional: use para rastreio manual da sacola, se desejar"
                     />
-                    {formData.numeroBag && (
-                      <p className="text-sm text-amber-600 mt-1">
-                        ⚠️ Os valores financeiros abaixo são opcionais quando há
-                        número de bag
-                      </p>
-                    )}
-                    {bagInvalida && (
-                      <p className="text-sm text-red-600 mt-1 font-semibold">
-                        ❌ Os números 00, 01, 02, 03, 04 (ou 0, 1, 2, 3, 4) não
-                        são permitidos para BAG.
-                      </p>
-                    )}
                   </div>
 
                   <div></div>
 
                   <div>
                     <label className="block text-sm font-semibold text-gray-700 mb-2">
-                      💵 Valor Entrada Notas (R$){!formData.numeroBag && " *"}
+                      💵 Valor Entrada Notas (R$)
                     </label>
                     <input
                       type="number"
@@ -848,7 +809,6 @@ export function MovimentacoesLoja() {
                   <div>
                     <label className="block text-sm font-semibold text-gray-700 mb-2">
                       💳 Valor Entrada Cartão/PIX (R$)
-                      {!formData.numeroBag && " *"}
                     </label>
                     <input
                       type="number"
@@ -885,27 +845,23 @@ export function MovimentacoesLoja() {
 
                 <button
                   type="submit"
-                  disabled={salvando || bloqueadoPorOutraLoja || bagInvalida}
+                  disabled={salvando || bloqueadoPorOutraLoja}
                   className={`w-full text-lg py-3 font-bold rounded-xl transition-colors ${
-                    bloqueadoPorOutraLoja || bagInvalida
+                    bloqueadoPorOutraLoja
                       ? "bg-gray-300 text-gray-500 cursor-not-allowed"
                       : "btn-primary"
                   }`}
                   title={
                     bloqueadoPorOutraLoja
                       ? `Conclua a loja "${lojaComMovimentacao?.nome}" primeiro`
-                      : bagInvalida
-                        ? "Número de bag inválido. Use um valor diferente de 00, 01, 02, 03, 04, 0, 1, 2, 3 ou 4."
-                        : ""
+                      : ""
                   }
                 >
                   {salvando
                     ? "Salvando..."
                     : bloqueadoPorOutraLoja
                       ? "🔒 Formulário Bloqueado"
-                      : bagInvalida
-                        ? "⚠️ BAG Inválida"
-                        : "💾 Salvar Movimentação"}
+                      : "💾 Salvar Movimentação"}
                 </button>
               </form>
             </div>

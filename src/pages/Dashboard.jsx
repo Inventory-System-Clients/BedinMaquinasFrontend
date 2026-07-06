@@ -2274,7 +2274,7 @@ export function Dashboard() {
                             const valorTotalFinanceiro =
                               Number(mov.valorFaturado ?? mov.valor_faturado ?? 0) ||
                               (valorNotas + valorCartao + valorFichas);
-                            const temBag = Boolean(String(mov.numeroBag || "").trim());
+                            const temSacola = Boolean(String(mov.numeroSacola || "").trim());
                             const financeiroPreenchido = valorTotalFinanceiro > 0;
 
                             return (
@@ -2342,9 +2342,9 @@ export function Dashboard() {
                                 <p className="text-gray-600 flex items-center gap-1">
                                   <span>💰</span> Financeiro da Movimentação
                                 </p>
-                                {temBag && (
+                                {temSacola && (
                                   <p className="text-xs text-gray-500 mb-1">
-                                    Bag: <span className="font-semibold">{mov.numeroBag}</span>
+                                    Sacola: <span className="font-semibold">{mov.numeroSacola}</span>
                                   </p>
                                 )}
                                 {financeiroPreenchido ? (
@@ -2357,13 +2357,13 @@ export function Dashboard() {
                                       {valorFichas > 0 ? ` | Fichas: R$ ${valorFichas.toFixed(2)}` : ""}
                                     </p>
                                   </div>
-                                ) : temBag ? (
+                                ) : temSacola ? (
                                   <p className="text-xs font-semibold text-amber-600">
-                                    Bag levada, aguardando preenchimento no Financeiro.
+                                    Sacola levada, aguardando preenchimento no Financeiro.
                                   </p>
                                 ) : (
                                   <p className="text-xs text-gray-500">
-                                    Sem bag informada nesta movimentação.
+                                    Sem sacola informada nesta movimentação.
                                   </p>
                                 )}
                               </div>

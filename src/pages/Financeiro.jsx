@@ -13,12 +13,13 @@ export function Financeiro() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
+  const [aviso, setAviso] = useState("");
   const [editando, setEditando] = useState(null);
   const [valores, setValores] = useState({
     valorEntradaNotas: "",
     valorEntradaCartao: "",
   });
-  const [bagBusca, setBagBusca] = useState("");
+  const [sacolaBusca, setSacolaBusca] = useState("");
   const [lojaBusca, setLojaBusca] = useState("");
 
   useEffect(() => {
@@ -60,8 +61,19 @@ export function Financeiro() {
   const salvarValores = async (movimentacaoId) => {
     try {
       setError("");
-      await api.put(`/movimentacoes/${movimentacaoId}/financeiro`, valores);
-      setSuccess("Valores financeiros salvos com sucesso!");
+      const { data } = await api.put(`/movimentacoes/${movimentacaoId}/financeiro`, valores);
+      const fechamento = data?.machinePayFechamento;
+      setAviso("");
+      if (fechamento?.executado && fechamento?.concluido) {
+        setSuccess("Valores financeiros salvos com sucesso! ✅ Conferido com Machine Pay");
+      } else if (fechamento?.executado && !fechamento?.concluido) {
+        setSuccess("Valores financeiros salvos com sucesso!");
+        setAviso(
+          `Valores salvos, mas não foi possível sincronizar com a Machine Pay: ${fechamento.erro || "erro desconhecido"}`
+        );
+      } else {
+        setSuccess("Valores financeiros salvos com sucesso!");
+      }
       setEditando(null);
       setValores({
         // Removido valorEntradaMoedas
@@ -82,12 +94,13 @@ export function Financeiro() {
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         <PageHeader
           title="Gestão Financeira"
-          subtitle="Preencha valores de movimentações com bag pendentes"
+          subtitle="Preencha valores de movimentações com sacola pendentes"
           icon="💰"
         />
 
         {error && <AlertBox type="error" message={error} onClose={() => setError("")} />}
         {success && <AlertBox type="success" message={success} onClose={() => setSuccess("")} />}
+        {aviso && <AlertBox type="warning" message={aviso} onClose={() => setAviso("")} />}
 
         {lojasAReceber.length === 0 && movimentacoes.length === 0 ? (
           <EmptyState message="Não há movimentações pendentes de preenchimento financeiro" icon="✅" />
@@ -143,13 +156,13 @@ export function Financeiro() {
             {/* Pendentes de Valores */}
             <div className="bg-white shadow-md rounded-lg overflow-hidden">
               <div className="p-4 border-b flex flex-col md:flex-row md:items-center md:justify-between gap-2 md:gap-0">
-                <h2 className="text-xl font-bold">Pendentes de Valores (Bags)</h2>
+                <h2 className="text-xl font-bold">Pendentes de Valores (Sacolas)</h2>
                 <div className="flex gap-2 mt-2 md:mt-0">
                   <input
                     type="text"
-                    placeholder="Buscar por Nº Bag..."
-                    value={bagBusca}
-                    onChange={e => setBagBusca(e.target.value)}
+                    placeholder="Buscar por Nº Sacola..."
+                    value={sacolaBusca}
+                    onChange={e => setSacolaBusca(e.target.value)}
                     className="px-2 py-1 border rounded text-sm w-44"
                   />
                   <input
@@ -168,7 +181,7 @@ export function Financeiro() {
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Data</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Loja</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Máquina</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Nº Bag</th>
+                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Nº Sacola</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Funcionário</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Valores (R$)</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Ações</th>
@@ -177,17 +190,23 @@ export function Financeiro() {
                   <tbody className="bg-white divide-y divide-gray-200">
                     {movimentacoes
                       .filter(mov => {
-                        const bagOk = bagBusca.trim() === "" || (mov.numeroBag && mov.numeroBag.toString().includes(bagBusca.trim()));
+                        const sacolaOk = sacolaBusca.trim() === "" || (mov.numeroSacola && mov.numeroSacola.toString().includes(sacolaBusca.trim()));
                         const lojaNome = mov.maquina?.loja?.nome?.toLowerCase() || "";
                         const lojaOk = lojaBusca.trim() === "" || lojaNome.includes(lojaBusca.trim().toLowerCase());
-                        return bagOk && lojaOk;
+                        return sacolaOk && lojaOk;
                       })
                       .map((mov) => (
                       <tr key={mov.id} className="hover:bg-gray-50">
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{new Date(mov.dataColeta).toLocaleDateString("pt-BR")}</td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{mov.maquina?.loja?.nome || "N/A"}</td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{mov.maquina?.codigo} - {mov.maquina?.nome}</td>
-                        <td className="px-6 py-4 whitespace-nowrap"><span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-yellow-100 text-yellow-800">{mov.numeroBag}</span></td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{mov.maquina?.nome || mov.maquina?.codigo || "N/A"}</td>
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          {mov.numeroSacola ? (
+                            <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-yellow-100 text-yellow-800">{mov.numeroSacola}</span>
+                          ) : (
+                            <span className="text-gray-400 text-xs">—</span>
+                          )}
+                        </td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{mov.usuario?.nome || "N/A"}</td>
                         <td className="px-6 py-4 text-sm text-gray-900">
                           {editando === mov.id ? (
@@ -196,7 +215,12 @@ export function Financeiro() {
                               <input type="number" step="0.01" placeholder="Digital" value={valores.valorEntradaCartao} onChange={(e) => setValores({ ...valores, valorEntradaCartao: e.target.value })} className="w-full px-2 py-1 border rounded text-sm" />
                             </div>
                           ) : (
-                            <span className="text-yellow-600 font-semibold">Pendente</span>
+                            <div>
+                              <div className="font-semibold">
+                                R$ {Number(mov.valorEntradaNotas || 0).toLocaleString("pt-BR", { minimumFractionDigits: 2 })}
+                              </div>
+                              <span className="text-yellow-600 text-xs font-semibold">Pendente</span>
+                            </div>
                           )}
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
