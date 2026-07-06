@@ -236,7 +236,6 @@ export function Financeiro() {
                   <thead className="bg-gray-50">
                     <tr>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Data</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Loja</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Máquina</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Nº Sacola</th>
                       <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Funcionário</th>
@@ -255,7 +254,6 @@ export function Financeiro() {
                       .map((mov) => (
                       <tr key={mov.id} className="hover:bg-gray-50">
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{new Date(mov.dataColeta).toLocaleDateString("pt-BR")}</td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{mov.maquina?.loja?.nome || "N/A"}</td>
                         <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{mov.maquina?.nome || mov.maquina?.codigo || "N/A"}</td>
                         <td className="px-6 py-4 whitespace-nowrap">
                           {mov.numeroSacola ? (
