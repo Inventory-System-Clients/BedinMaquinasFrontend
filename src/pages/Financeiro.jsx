@@ -20,6 +20,10 @@ export function Financeiro() {
     valorEntradaCartao: "",
   });
   const [cartaoEditadoManualmente, setCartaoEditadoManualmente] = useState(false);
+  const [buscandoDigital, setBuscandoDigital] = useState(false);
+  const [precisaDataInicioDigital, setPrecisaDataInicioDigital] = useState(false);
+  const [dataInicioDigital, setDataInicioDigital] = useState("");
+  const [mensagemDigital, setMensagemDigital] = useState("");
   const [sacolaBusca, setSacolaBusca] = useState("");
   const [lojaBusca, setLojaBusca] = useState("");
 
@@ -50,6 +54,14 @@ export function Financeiro() {
       valorEntradaCartao: movimentacao.valorEntradaCartao ?? "",
     });
     setCartaoEditadoManualmente(false);
+    setPrecisaDataInicioDigital(false);
+    setDataInicioDigital("");
+    setMensagemDigital("");
+
+    // Se o valor digital não veio pronto, tenta buscar automaticamente ao abrir a conferência
+    if (movimentacao.valorEntradaCartao === null || movimentacao.valorEntradaCartao === undefined) {
+      buscarValorDigital(movimentacao.id);
+    }
   };
 
   const cancelarEdicao = () => {
@@ -59,6 +71,40 @@ export function Financeiro() {
       valorEntradaCartao: "",
     });
     setCartaoEditadoManualmente(false);
+    setPrecisaDataInicioDigital(false);
+    setDataInicioDigital("");
+    setMensagemDigital("");
+  };
+
+  const buscarValorDigital = async (movimentacaoId, inicio) => {
+    try {
+      setBuscandoDigital(true);
+      setMensagemDigital("");
+      const body = inicio ? { inicio } : undefined;
+      const { data } = await api.post(
+        `/movimentacoes/${movimentacaoId}/machine-pay/valor-digital`,
+        body
+      );
+      setValores((prev) => ({ ...prev, valorEntradaCartao: data.valorEntradaCartao ?? "" }));
+      setCartaoEditadoManualmente(true);
+      setPrecisaDataInicioDigital(false);
+      setMensagemDigital("✅ Valor digital atualizado via Machine Pay.");
+    } catch (error) {
+      const respData = error.response?.data;
+      if (respData?.precisaDataInicio) {
+        setPrecisaDataInicioDigital(true);
+        setMensagemDigital(
+          respData.error || "Informe a data de início para calcular o valor digital."
+        );
+      } else {
+        setPrecisaDataInicioDigital(false);
+        setMensagemDigital(
+          "❌ " + (respData?.error || error.message || "Erro ao buscar valor digital.")
+        );
+      }
+    } finally {
+      setBuscandoDigital(false);
+    }
   };
 
   const salvarValores = async (movimentacaoId) => {
@@ -88,6 +134,9 @@ export function Financeiro() {
         valorEntradaCartao: "",
       });
       setCartaoEditadoManualmente(false);
+      setPrecisaDataInicioDigital(false);
+      setDataInicioDigital("");
+      setMensagemDigital("");
       await carregarPendenciasFinanceiras();
     } catch (error) {
       setError("Erro ao salvar valores: " + (error.response?.data?.error || error.message));
@@ -240,6 +289,41 @@ export function Financeiro() {
                                   <p className="text-xs text-gray-400 mt-1">
                                     Pré-preenchido via Machine Pay. Edite apenas para corrigir.
                                   </p>
+                                )}
+
+                                <button
+                                  type="button"
+                                  onClick={() => buscarValorDigital(mov.id)}
+                                  disabled={buscandoDigital}
+                                  className="text-xs text-blue-600 hover:underline mt-1 disabled:opacity-50"
+                                >
+                                  {buscandoDigital ? "Buscando..." : "🔄 Buscar novamente"}
+                                </button>
+
+                                {mensagemDigital && (
+                                  <p className="text-xs mt-1 text-gray-600">{mensagemDigital}</p>
+                                )}
+
+                                {precisaDataInicioDigital && (
+                                  <div className="mt-2 p-2 bg-blue-50 border-l-4 border-blue-300 rounded space-y-1">
+                                    <label className="block text-xs font-semibold text-gray-700">
+                                      Buscar desde:
+                                    </label>
+                                    <input
+                                      type="datetime-local"
+                                      value={dataInicioDigital}
+                                      onChange={(e) => setDataInicioDigital(e.target.value)}
+                                      className="w-full px-1 py-0.5 border rounded text-xs"
+                                    />
+                                    <button
+                                      type="button"
+                                      onClick={() => buscarValorDigital(mov.id, dataInicioDigital)}
+                                      disabled={!dataInicioDigital || buscandoDigital}
+                                      className="text-xs text-blue-700 font-semibold hover:underline disabled:opacity-50"
+                                    >
+                                      Buscar desde essa data
+                                    </button>
+                                  </div>
                                 )}
                               </div>
                             </div>
