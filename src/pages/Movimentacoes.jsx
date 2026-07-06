@@ -82,7 +82,6 @@ export function Movimentacoes() {
     quantidade_notas_entrada: "",
     valor_entrada_maquininha_pix: "",
     valorEntradaNotas: "",
-    valorEntradaCartao: "",
     dataColeta: "",
   });
 
@@ -97,7 +96,6 @@ export function Movimentacoes() {
     quantidade_notas_entrada: "",
     valor_entrada_maquininha_pix: "",
     valorEntradaNotas: "",
-    valorEntradaCartao: "",
     observacao: "",
     retiradaEstoque: false,
   });
@@ -183,7 +181,6 @@ export function Movimentacoes() {
       quantidade_notas_entrada: "",
       valor_entrada_maquininha_pix: "",
       valorEntradaNotas: "",
-      valorEntradaCartao: "",
       observacao: "",
       retiradaEstoque: false,
     });
@@ -335,9 +332,6 @@ export function Movimentacoes() {
         valorEntradaNotas: formData.valorEntradaNotas
           ? parseFloat(formData.valorEntradaNotas)
           : null,
-        valorEntradaCartao: formData.valorEntradaCartao
-          ? parseFloat(formData.valorEntradaCartao)
-          : null,
         retiradaEstoque: formData.retiradaEstoque,
         contadorMaquina: null,
         observacoes: observacaoFinal || null,
@@ -399,7 +393,6 @@ export function Movimentacoes() {
       valor_entrada_maquininha_pix:
         movimentacao.valor_entrada_maquininha_pix || "",
       valorEntradaNotas: movimentacao.valorEntradaNotas || "",
-      valorEntradaCartao: movimentacao.valorEntradaCartao || "",
       dataColeta: toDatetimeLocalValue(
         movimentacao.dataColeta || movimentacao.createdAt
       ),
@@ -413,7 +406,6 @@ export function Movimentacoes() {
       quantidade_notas_entrada: "",
       valor_entrada_maquininha_pix: "",
       valorEntradaNotas: "",
-      valorEntradaCartao: "",
       dataColeta: "",
     });
   };
@@ -433,10 +425,6 @@ export function Movimentacoes() {
         valorEntradaNotas:
           formEdicao.valorEntradaNotas !== ""
             ? parseFloat(formEdicao.valorEntradaNotas)
-            : null,
-        valorEntradaCartao:
-          formEdicao.valorEntradaCartao !== ""
-            ? parseFloat(formEdicao.valorEntradaCartao)
             : null,
         dataColeta: toBackendDatetimeValue(formEdicao.dataColeta),
       };
@@ -908,7 +896,7 @@ export function Movimentacoes() {
               <h3 className="text-lg font-bold text-gray-800 mb-3 mt-6">
                 💰 Valores de Entrada (Arrecadação)
               </h3>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
 
                 <div>
                   <label className="block text-sm font-semibold text-gray-700 mb-2">
@@ -928,25 +916,10 @@ export function Movimentacoes() {
                     Valor total em notas coletadas
                   </p>
                 </div>
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-2">
-                    💳 Valor Entrada Cartão/PIX (R$)
-                  </label>
-                  <input
-                    type="number"
-                    name="valorEntradaCartao"
-                    value={formData.valorEntradaCartao}
-                    onChange={handleChange}
-                    className="input-field"
-                    placeholder="0.00"
-                    min="0"
-                    step="0.01"
-                  />
-                  <p className="text-xs text-gray-500 mt-1">
-                    Valor total recebido via pagamento digital
-                  </p>
-                </div>
               </div>
+              <p className="text-xs text-gray-500 mt-1">
+                O valor digital (cartão/PIX) é calculado automaticamente pelo sistema via Machine Pay.
+              </p>
 
               {/* Campos Antigos - Deprecated */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
@@ -1400,25 +1373,9 @@ export function Movimentacoes() {
                   />
                 </div>
 
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-2">
-                    💳 Valor Entrada Cartão/PIX (R$)
-                  </label>
-                  <input
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    value={formEdicao.valorEntradaCartao}
-                    onChange={(e) =>
-                      setFormEdicao({
-                        ...formEdicao,
-                        valorEntradaCartao: e.target.value,
-                      })
-                    }
-                    className="input-field"
-                    placeholder="0.00"
-                  />
-                </div>
+                <p className="text-xs text-gray-500">
+                  O valor digital (cartão/PIX) é calculado automaticamente pelo sistema via Machine Pay e pode ser corrigido na tela de Financeiro.
+                </p>
 
                 <h4 className="text-md font-semibold text-gray-400 mt-4">
                   ⚠️ Campos Antigos (Não usar)

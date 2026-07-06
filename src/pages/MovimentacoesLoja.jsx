@@ -103,9 +103,7 @@ export function MovimentacoesLoja() {
     contadorIn: "",
     contadorOut: "",
     valor_entrada_maquininha_pix: "",
-    numeroSacola: "",
     valorEntradaNotas: "",
-    valorEntradaCartao: "",
     observacao: "",
   });
 
@@ -308,8 +306,6 @@ export function MovimentacoesLoja() {
       setError("Selecione um produto para registrar a movimentação.");
       return;
     }
-    const numeroSacolaInformado = formData.numeroSacola?.trim() || "";
-
     try {
       setSalvando(true);
       const movimentacao = {
@@ -326,12 +322,8 @@ export function MovimentacoesLoja() {
         quantidade_notas_entrada: 0,
         valor_entrada_maquininha_pix:
           parseFloat(formData.valor_entrada_maquininha_pix) || 0,
-        numeroSacola: numeroSacolaInformado || null,
         valorEntradaNotas: formData.valorEntradaNotas
           ? parseFloat(formData.valorEntradaNotas)
-          : null,
-        valorEntradaCartao: formData.valorEntradaCartao
-          ? parseFloat(formData.valorEntradaCartao)
           : null,
         observacoes: formData.observacao || "",
         produtos: formData.produto_id
@@ -765,27 +757,6 @@ export function MovimentacoesLoja() {
                     />
                   </div>
 
-                  {/* Número da Sacola */}
-                  <div className="md:col-span-2">
-                    <label className="block text-sm font-semibold text-gray-700 mb-2">
-                      🎒 Número da Sacola (opcional)
-                    </label>
-                    <input
-                      type="text"
-                      value={formData.numeroSacola}
-                      onChange={(e) =>
-                        setFormData({
-                          ...formData,
-                          numeroSacola: e.target.value,
-                        })
-                      }
-                      className="input-field"
-                      placeholder="Opcional: use para rastreio manual da sacola, se desejar"
-                    />
-                  </div>
-
-                  <div></div>
-
                   <div>
                     <label className="block text-sm font-semibold text-gray-700 mb-2">
                       💵 Valor Entrada Notas (R$)
@@ -804,26 +775,9 @@ export function MovimentacoesLoja() {
                       min="0"
                       placeholder="0.00"
                     />
-                  </div>
-
-                  <div>
-                    <label className="block text-sm font-semibold text-gray-700 mb-2">
-                      💳 Valor Entrada Cartão/PIX (R$)
-                    </label>
-                    <input
-                      type="number"
-                      step="0.01"
-                      value={formData.valorEntradaCartao}
-                      onChange={(e) =>
-                        setFormData({
-                          ...formData,
-                          valorEntradaCartao: e.target.value,
-                        })
-                      }
-                      className="input-field"
-                      min="0"
-                      placeholder="0.00"
-                    />
+                    <p className="text-xs text-gray-500 mt-1">
+                      O valor digital (cartão/PIX) e o número da sacola são calculados automaticamente pelo sistema.
+                    </p>
                   </div>
                 </div>
 

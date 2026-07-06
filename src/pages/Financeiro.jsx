@@ -19,6 +19,7 @@ export function Financeiro() {
     valorEntradaNotas: "",
     valorEntradaCartao: "",
   });
+  const [cartaoEditadoManualmente, setCartaoEditadoManualmente] = useState(false);
   const [sacolaBusca, setSacolaBusca] = useState("");
   const [lojaBusca, setLojaBusca] = useState("");
 
@@ -46,8 +47,9 @@ export function Financeiro() {
     setEditando(movimentacao.id);
     setValores({
       valorEntradaNotas: movimentacao.valorEntradaNotas || "",
-      valorEntradaCartao: movimentacao.valorEntradaCartao || "",
+      valorEntradaCartao: movimentacao.valorEntradaCartao ?? "",
     });
+    setCartaoEditadoManualmente(false);
   };
 
   const cancelarEdicao = () => {
@@ -56,12 +58,17 @@ export function Financeiro() {
       valorEntradaNotas: "",
       valorEntradaCartao: "",
     });
+    setCartaoEditadoManualmente(false);
   };
 
   const salvarValores = async (movimentacaoId) => {
     try {
       setError("");
-      const { data } = await api.put(`/movimentacoes/${movimentacaoId}/financeiro`, valores);
+      const payload = { valorEntradaNotas: valores.valorEntradaNotas };
+      if (cartaoEditadoManualmente) {
+        payload.valorEntradaCartao = valores.valorEntradaCartao;
+      }
+      const { data } = await api.put(`/movimentacoes/${movimentacaoId}/financeiro`, payload);
       const fechamento = data?.machinePayFechamento;
       setAviso("");
       if (fechamento?.executado && fechamento?.concluido) {
@@ -80,6 +87,7 @@ export function Financeiro() {
         valorEntradaNotas: "",
         valorEntradaCartao: "",
       });
+      setCartaoEditadoManualmente(false);
       await carregarPendenciasFinanceiras();
     } catch (error) {
       setError("Erro ao salvar valores: " + (error.response?.data?.error || error.message));
@@ -212,7 +220,28 @@ export function Financeiro() {
                           {editando === mov.id ? (
                             <div className="space-y-2">
                               <input type="number" step="0.01" placeholder="Notas" value={valores.valorEntradaNotas} onChange={(e) => setValores({ ...valores, valorEntradaNotas: e.target.value })} className="w-full px-2 py-1 border rounded text-sm" />
-                              <input type="number" step="0.01" placeholder="Digital" value={valores.valorEntradaCartao} onChange={(e) => setValores({ ...valores, valorEntradaCartao: e.target.value })} className="w-full px-2 py-1 border rounded text-sm" />
+                              <div>
+                                <input
+                                  type="number"
+                                  step="0.01"
+                                  placeholder="Digital (cartão/PIX)"
+                                  value={valores.valorEntradaCartao}
+                                  onChange={(e) => {
+                                    setValores({ ...valores, valorEntradaCartao: e.target.value });
+                                    setCartaoEditadoManualmente(true);
+                                  }}
+                                  className="w-full px-2 py-1 border rounded text-sm"
+                                />
+                                {mov.valorEntradaCartao === null || mov.valorEntradaCartao === undefined ? (
+                                  <p className="text-xs text-amber-600 mt-1">
+                                    ⚠️ Não calculado automaticamente — preencha manualmente se necessário.
+                                  </p>
+                                ) : (
+                                  <p className="text-xs text-gray-400 mt-1">
+                                    Pré-preenchido via Machine Pay. Edite apenas para corrigir.
+                                  </p>
+                                )}
+                              </div>
                             </div>
                           ) : (
                             <div>
