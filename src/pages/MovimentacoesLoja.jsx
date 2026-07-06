@@ -90,6 +90,9 @@ export function MovimentacoesLoja() {
   const [modalInconsistencia, setModalInconsistencia] = useState(null);
   const [justificativaInconsistencia, setJustificativaInconsistencia] =
     useState("");
+  const [machinePayPrecisaDataInicio, setMachinePayPrecisaDataInicio] =
+    useState(false);
+  const [machinePayDataInicio, setMachinePayDataInicio] = useState("");
 
   // Formulário de movimentação
   // Inicializa com o ID da máquina passada via navegação, se houver
@@ -117,6 +120,23 @@ export function MovimentacoesLoja() {
       localStorage.removeItem("lojaAtiva");
     }
   }, [loja]);
+
+  // Verifica se é a primeira coleta da máquina com Machine Pay configurado
+  useEffect(() => {
+    setMachinePayDataInicio("");
+    setMachinePayPrecisaDataInicio(false);
+
+    if (!maquinaSelecionada) return;
+
+    api
+      .get(`/maquinas/${maquinaSelecionada}/estoque-atual`)
+      .then(({ data }) => {
+        setMachinePayPrecisaDataInicio(Boolean(data?.machinePayPrecisaDataInicio));
+      })
+      .catch((err) => {
+        console.warn("Não foi possível verificar status da Machine Pay:", err);
+      });
+  }, [maquinaSelecionada]);
 
   const carregarDados = async () => {
     try {
@@ -306,6 +326,16 @@ export function MovimentacoesLoja() {
       setError("Selecione um produto para registrar a movimentação.");
       return;
     }
+    if (machinePayPrecisaDataInicio && !machinePayDataInicio.trim()) {
+      const continuarSemData = window.confirm(
+        "Você não informou desde quando considerar os valores digitais (PIX/cartão) da Machine Pay. " +
+          "Esta é a primeira coleta desta máquina com Machine Pay e esse dado pode ficar em branco, mas o ideal é informar. " +
+          "Deseja continuar mesmo assim sem informar a data?",
+      );
+      if (!continuarSemData) {
+        return;
+      }
+    }
     try {
       setSalvando(true);
       const movimentacao = {
@@ -325,6 +355,9 @@ export function MovimentacoesLoja() {
         valorEntradaNotas: formData.valorEntradaNotas
           ? parseFloat(formData.valorEntradaNotas)
           : null,
+        ...(machinePayPrecisaDataInicio && machinePayDataInicio.trim()
+          ? { machinePayDataInicio: machinePayDataInicio.trim() }
+          : {}),
         observacoes: formData.observacao || "",
         produtos: formData.produto_id
           ? [
@@ -780,6 +813,24 @@ export function MovimentacoesLoja() {
                     </p>
                   </div>
                 </div>
+
+                {/* Data de início Machine Pay - primeira coleta com Machine Pay */}
+                {machinePayPrecisaDataInicio && (
+                  <div className="p-4 bg-blue-50 border-l-4 border-blue-400 rounded">
+                    <label className="block text-sm font-semibold text-gray-700 mb-2">
+                      📅 Desde quando devemos considerar os valores digitais (PIX/cartão) da Machine Pay para esta máquina?
+                    </label>
+                    <input
+                      type="datetime-local"
+                      value={machinePayDataInicio}
+                      onChange={(e) => setMachinePayDataInicio(e.target.value)}
+                      className="input-field"
+                    />
+                    <p className="text-xs text-gray-600 mt-1">
+                      Esta é a primeira coleta desta máquina com Machine Pay configurada. Informe a data/hora a partir da qual o sistema deve somar os valores digitais registrados na maquininha.
+                    </p>
+                  </div>
+                )}
 
                 {/* Observação */}
                 <div>
