@@ -129,6 +129,11 @@ function RoteiroMapaLocalizacao({ localizacao, grande = false, onClick }) {
   );
 }
 
+function ehRoteiroFixo(roteiro) {
+  const data = String(roteiro?.data || "").split("T")[0];
+  return data === DATA_ROTEIRO_FIXO;
+}
+
 function calcularProgressoMaquinasRoteiro(roteiro) {
   const total = Number(roteiro?.totalMaquinas || 0);
   const atendidas = Number(roteiro?.maquinasConcluidas || 0);
@@ -151,7 +156,7 @@ export function SelecionarRoteiro() {
       const response = await api.post(`/roteiros/${roteiroId}/desfazer-finalizacao`, {});
       console.log('✅ Finalização desfeita com sucesso:', response.data);
       setSuccess("Finalização desfeita! O roteiro voltou para pendente.");
-      await carregarRoteiros();
+      await carregarRoteiros({ fresh: true });
     } catch (error) {
       console.error('❌ Erro ao desfazer finalização:', error);
       console.error('Detalhes do erro:', {
@@ -186,7 +191,7 @@ export function SelecionarRoteiro() {
         setError("");
         await api.delete(`/roteiros/remover-loja/${lojaId}`);
         setSuccess("Loja removida de todos os roteiros!");
-        await carregarRoteiros();
+        await carregarRoteiros({ fresh: true });
       } catch (error) {
         setError("Erro ao remover loja: " + (error.response?.data?.error || error.message));
       }
@@ -214,7 +219,6 @@ export function SelecionarRoteiro() {
   const [mapaExpandido, setMapaExpandido] = useState(null);
   const [showModalCriarRoteiro, setShowModalCriarRoteiro] = useState(false);
   const [novoRoteiro, setNovoRoteiro] = useState({
-    data: DATA_ROTEIRO_FIXO,
     zona: "",
     estado: "",
     cidade: "",
@@ -296,14 +300,20 @@ export function SelecionarRoteiro() {
   };
 
   // Função para buscar roteiros do dia 24/02/2026 e bolinhas do dia atual
-  const carregarRoteiros = async () => {
+  // `fresh: true` deve ser usado logo após qualquer mutação (excluir, adicionar/mover loja,
+  // atribuir funcionário, etc.) para ignorar o cache de ~20s do backend e evitar mostrar
+  // dados desatualizados justo após a ação do usuário.
+  const carregarRoteiros = async ({ fresh = false } = {}) => {
     try {
       setLoading(true);
-      // Buscar roteiros do dia 24/02/2026
-      const responseFixo = await api.get("/roteiros", { params: { data: DATA_ROTEIRO_FIXO } });
-      // Buscar roteiros bolinha do dia atual
       const hoje = new Date().toISOString().split("T")[0];
-      const responseBolinha = await api.get("/roteiros", { params: { data: hoje } });
+      const paramsFixo = fresh ? { data: DATA_ROTEIRO_FIXO, fresh: true } : { data: DATA_ROTEIRO_FIXO };
+      const paramsHoje = fresh ? { data: hoje, fresh: true } : { data: hoje };
+
+      // Buscar roteiros do dia 24/02/2026
+      const responseFixo = await api.get("/roteiros", { params: paramsFixo });
+      // Buscar roteiros bolinha do dia atual
+      const responseBolinha = await api.get("/roteiros", { params: paramsHoje });
       // Filtrar apenas os de bolinha e o Roteiro Coringa do dia atual
       const bolinhasHoje = (responseBolinha.data || []).filter(r => (r.zona || "").toLowerCase().startsWith("bolinha") || r.zona === "Roteiro Coringa");
       // Priorizar roteiros do dia 24: se houver bolinha com mesmo nome/zona, não adicionar do dia atual
@@ -346,7 +356,7 @@ export function SelecionarRoteiro() {
       setError("");
       await api.delete(`/roteiros/${roteiroId}/lojas/${lojaId}`);
       setSuccess("Loja removida do roteiro!");
-      await carregarRoteiros();
+      await carregarRoteiros({ fresh: true });
     } catch (error) {
       setError("Erro ao remover loja: " + (error.response?.data?.error || error.message));
     }
@@ -465,7 +475,7 @@ export function SelecionarRoteiro() {
       });
 
       setSuccess(`Loja "${draggedLoja.nome}" movida com sucesso!`);
-      await carregarRoteiros();
+      await carregarRoteiros({ fresh: true });
     } catch (error) {
       setError(
         "Erro ao mover loja: " + (error.response?.data?.error || error.message),
@@ -482,7 +492,7 @@ export function SelecionarRoteiro() {
       await api.put(`/roteiros/${roteiroId}`, { funcionarioId });
 
       setSuccess("Funcionário atribuído com sucesso!");
-      await carregarRoteiros();
+      await carregarRoteiros({ fresh: true });
     } catch (error) {
       setError(
         "Erro ao atribuir funcionário: " +
@@ -510,7 +520,7 @@ export function SelecionarRoteiro() {
       await api.post(`/roteiros/${roteiroId}/lojas`, { lojaId });
 
       setSuccess("Loja adicionada ao roteiro com sucesso!");
-      await carregarRoteiros();
+      await carregarRoteiros({ fresh: true });
     } catch (error) {
       setError(
         "Erro ao adicionar loja: " +
@@ -551,7 +561,7 @@ export function SelecionarRoteiro() {
         });
 
         setSuccess(`Loja "${loja.nome}" movida com sucesso!`);
-        await carregarRoteiros();
+        await carregarRoteiros({ fresh: true });
         fecharModalAdicionarLoja();
       } catch (error) {
         setError(
@@ -576,7 +586,10 @@ export function SelecionarRoteiro() {
       setError("");
       await api.delete(`/roteiros/${roteiro.id}`);
       setSuccess("Roteiro deletado com sucesso!");
-      await carregarRoteiros();
+      // Remove localmente na hora, sem esperar o refetch — evita qualquer janela
+      // em que a tela ainda mostre o roteiro já excluído no backend.
+      setRoteiros((prev) => prev.filter((r) => r.id !== roteiro.id));
+      await carregarRoteiros({ fresh: true });
       return;
     } catch (error) {
       const precisaForce =
@@ -598,7 +611,8 @@ export function SelecionarRoteiro() {
       setError("");
       await api.delete(`/roteiros/${roteiro.id}?force=true`);
       setSuccess("Roteiro deletado com sucesso!");
-      await carregarRoteiros();
+      setRoteiros((prev) => prev.filter((r) => r.id !== roteiro.id));
+      await carregarRoteiros({ fresh: true });
     } catch (error) {
       setError("Erro ao deletar roteiro: " + (error.response?.data?.error || error.message));
     }
@@ -606,7 +620,6 @@ export function SelecionarRoteiro() {
 
   const abrirModalCriarRoteiro = () => {
     setNovoRoteiro({
-      data: DATA_ROTEIRO_FIXO,
       zona: "",
       estado: "",
       cidade: "",
@@ -644,16 +657,11 @@ export function SelecionarRoteiro() {
   };
 
   const criarRoteiroFixo = async () => {
-    if (!novoRoteiro.data) {
-      setError("Informe a data do roteiro.");
-      return;
-    }
-
     try {
       setCriandoRoteiro(true);
       setError("");
       const payload = {
-        data: novoRoteiro.data,
+        data: DATA_ROTEIRO_FIXO,
         zona: novoRoteiro.zona || undefined,
         estado: novoRoteiro.estado || undefined,
         cidade: novoRoteiro.cidade || undefined,
@@ -668,17 +676,8 @@ export function SelecionarRoteiro() {
 
       await api.post("/roteiros", payload);
       fecharModalCriarRoteiro();
-
-      if (novoRoteiro.data === DATA_ROTEIRO_FIXO) {
-        // Data padrão dos roteiros fixos: já aparece nesta mesma tela, sem precisar navegar.
-        setSuccess("Roteiro criado com sucesso!");
-        await carregarRoteiros();
-      } else {
-        // Data diferente da usada pelos roteiros fixos: esta tela não vai listá-lo,
-        // então vamos para a tela que lista todos os roteiros.
-        setSuccess("Roteiro criado com sucesso! Redirecionando para gerenciar roteiros...");
-        setTimeout(() => navigate("/roteiros/gerenciar"), 1200);
-      }
+      setSuccess("Roteiro criado com sucesso!");
+      await carregarRoteiros({ fresh: true });
     } catch (error) {
       setError("Erro ao criar roteiro: " + (error.response?.data?.error || error.message));
     } finally {
@@ -822,7 +821,7 @@ export function SelecionarRoteiro() {
           ? "Roteiro finalizado com alertas."
           : "Roteiro finalizado com sucesso!"
       );
-      await carregarRoteiros();
+      await carregarRoteiros({ fresh: true });
       await carregarAlertasRoteirosIncompletos();
     } catch (error) {
       setError("Erro ao finalizar roteiro: " + (error.response?.data?.error || error.message));
@@ -1004,6 +1003,15 @@ export function SelecionarRoteiro() {
                         </button>
                       )}
                     </div>
+                    {ehRoteiroFixo(roteiro) ? (
+                      <span className="self-start mb-2 text-xs font-semibold px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700">
+                        📌 Roteiro fixo (modelo, não é de hoje)
+                      </span>
+                    ) : (
+                      <span className="self-start mb-2 text-xs font-semibold px-2 py-0.5 rounded-full bg-teal-100 text-teal-700">
+                        📅 Hoje ({new Date(`${(roteiro.data || "").split("T")[0]}T00:00:00`).toLocaleDateString("pt-BR")})
+                      </span>
+                    )}
                     {renderMapaAdmin(roteiro)}
 
                     <div className="flex items-center justify-between">
@@ -1350,6 +1358,15 @@ export function SelecionarRoteiro() {
                         )}
                       </div>
                     </div>
+                    {ehRoteiroFixo(roteiro) ? (
+                      <span className="inline-block mb-2 text-xs font-semibold px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-700">
+                        📌 Roteiro fixo (modelo, não é de hoje)
+                      </span>
+                    ) : (
+                      <span className="inline-block mb-2 text-xs font-semibold px-2 py-0.5 rounded-full bg-teal-100 text-teal-700">
+                        📅 Hoje ({new Date(`${(roteiro.data || "").split("T")[0]}T00:00:00`).toLocaleDateString("pt-BR")})
+                      </span>
+                    )}
                     {renderMapaAdmin(roteiro)}
 
                     <div className="space-y-2 text-gray-700">
@@ -1807,23 +1824,6 @@ export function SelecionarRoteiro() {
             <div className="flex-1 overflow-y-auto p-6 space-y-6">
               {/* Dados do roteiro */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div>
-                  <label className="text-sm font-semibold text-gray-700 block mb-1">
-                    Data *
-                  </label>
-                  <input
-                    type="date"
-                    value={novoRoteiro.data}
-                    onChange={(e) => setNovoRoteiro({ ...novoRoteiro, data: e.target.value })}
-                    className="input-field"
-                    required
-                  />
-                  <p className="text-xs text-gray-500 mt-1">
-                    {novoRoteiro.data === DATA_ROTEIRO_FIXO
-                      ? "Data padrão dos roteiros fixos — deixe assim para o roteiro aparecer nesta tela."
-                      : "Data diferente da padrão dos roteiros fixos — o roteiro não vai aparecer nesta tela, só em \"Gerenciar Roteiros\"."}
-                  </p>
-                </div>
                 <div>
                   <label className="text-sm font-semibold text-gray-700 block mb-1">
                     Zona
