@@ -7,6 +7,10 @@ import { PageHeader, AlertBox, Badge } from "../components/UIComponents";
 import { PageLoader, EmptyState } from "../components/Loading";
 import { useAuth } from "../contexts/AuthContext";
 
+// Data especial usada como "modelo" dos roteiros fixos (recorrentes) — não é uma data real,
+// é só a chave usada para esses roteiros sempre aparecerem nesta tela independente do dia de hoje.
+const DATA_ROTEIRO_FIXO = "2026-02-24";
+
 function normalizarLocalizacaoRoteiro(item) {
   if (!item) return null;
 
@@ -208,6 +212,19 @@ export function SelecionarRoteiro() {
   const [loadingAlertas, setLoadingAlertas] = useState(false);
   const [localizacoesRotas, setLocalizacoesRotas] = useState({});
   const [mapaExpandido, setMapaExpandido] = useState(null);
+  const [showModalCriarRoteiro, setShowModalCriarRoteiro] = useState(false);
+  const [novoRoteiro, setNovoRoteiro] = useState({
+    data: DATA_ROTEIRO_FIXO,
+    zona: "",
+    estado: "",
+    cidade: "",
+    funcionarioId: "",
+    observacoes: "",
+    saldoRestante: 500,
+  });
+  const [novoRoteiroLojas, setNovoRoteiroLojas] = useState([]);
+  const [filtroLojaNovoRoteiro, setFiltroLojaNovoRoteiro] = useState("");
+  const [criandoRoteiro, setCriandoRoteiro] = useState(false);
 
 
   useEffect(() => {
@@ -283,7 +300,7 @@ export function SelecionarRoteiro() {
     try {
       setLoading(true);
       // Buscar roteiros do dia 24/02/2026
-      const responseFixo = await api.get("/roteiros", { params: { data: "2026-02-24" } });
+      const responseFixo = await api.get("/roteiros", { params: { data: DATA_ROTEIRO_FIXO } });
       // Buscar roteiros bolinha do dia atual
       const hoje = new Date().toISOString().split("T")[0];
       const responseBolinha = await api.get("/roteiros", { params: { data: hoje } });
@@ -549,6 +566,126 @@ export function SelecionarRoteiro() {
     }
   };
 
+  const deletarRoteiro = async (roteiro) => {
+    const confirmar = window.confirm(
+      `Isso vai apagar todas as movimentações registradas no roteiro "${roteiro.zona || roteiro.nome || "sem nome"}". Tem certeza?`,
+    );
+    if (!confirmar) return;
+
+    try {
+      setError("");
+      await api.delete(`/roteiros/${roteiro.id}`);
+      setSuccess("Roteiro deletado com sucesso!");
+      await carregarRoteiros();
+      return;
+    } catch (error) {
+      const precisaForce =
+        error.response?.status === 400 &&
+        /force=true/i.test(error.response?.data?.error || "");
+
+      if (!precisaForce) {
+        setError("Erro ao deletar roteiro: " + (error.response?.data?.error || error.message));
+        return;
+      }
+    }
+
+    const confirmarForce = window.confirm(
+      "Este roteiro já está em andamento ou concluído. Excluir mesmo assim?",
+    );
+    if (!confirmarForce) return;
+
+    try {
+      setError("");
+      await api.delete(`/roteiros/${roteiro.id}?force=true`);
+      setSuccess("Roteiro deletado com sucesso!");
+      await carregarRoteiros();
+    } catch (error) {
+      setError("Erro ao deletar roteiro: " + (error.response?.data?.error || error.message));
+    }
+  };
+
+  const abrirModalCriarRoteiro = () => {
+    setNovoRoteiro({
+      data: DATA_ROTEIRO_FIXO,
+      zona: "",
+      estado: "",
+      cidade: "",
+      funcionarioId: "",
+      observacoes: "",
+      saldoRestante: 500,
+    });
+    setNovoRoteiroLojas([]);
+    setFiltroLojaNovoRoteiro("");
+    setShowModalCriarRoteiro(true);
+  };
+
+  const fecharModalCriarRoteiro = () => {
+    setShowModalCriarRoteiro(false);
+  };
+
+  const adicionarLojaAoNovoRoteiro = (loja) => {
+    setNovoRoteiroLojas((prev) =>
+      prev.some((l) => l.id === loja.id) ? prev : [...prev, loja],
+    );
+  };
+
+  const removerLojaDoNovoRoteiro = (lojaId) => {
+    setNovoRoteiroLojas((prev) => prev.filter((l) => l.id !== lojaId));
+  };
+
+  const moverLojaNovoRoteiro = (index, direcao) => {
+    setNovoRoteiroLojas((prev) => {
+      const destino = index + direcao;
+      if (destino < 0 || destino >= prev.length) return prev;
+      const copia = [...prev];
+      [copia[index], copia[destino]] = [copia[destino], copia[index]];
+      return copia;
+    });
+  };
+
+  const criarRoteiroFixo = async () => {
+    if (!novoRoteiro.data) {
+      setError("Informe a data do roteiro.");
+      return;
+    }
+
+    try {
+      setCriandoRoteiro(true);
+      setError("");
+      const payload = {
+        data: novoRoteiro.data,
+        zona: novoRoteiro.zona || undefined,
+        estado: novoRoteiro.estado || undefined,
+        cidade: novoRoteiro.cidade || undefined,
+        funcionarioId: novoRoteiro.funcionarioId || undefined,
+        observacoes: novoRoteiro.observacoes || undefined,
+        saldoRestante:
+          novoRoteiro.saldoRestante !== "" && novoRoteiro.saldoRestante !== null
+            ? Number(novoRoteiro.saldoRestante)
+            : undefined,
+        lojaIds: novoRoteiroLojas.map((l) => l.id),
+      };
+
+      await api.post("/roteiros", payload);
+      fecharModalCriarRoteiro();
+
+      if (novoRoteiro.data === DATA_ROTEIRO_FIXO) {
+        // Data padrão dos roteiros fixos: já aparece nesta mesma tela, sem precisar navegar.
+        setSuccess("Roteiro criado com sucesso!");
+        await carregarRoteiros();
+      } else {
+        // Data diferente da usada pelos roteiros fixos: esta tela não vai listá-lo,
+        // então vamos para a tela que lista todos os roteiros.
+        setSuccess("Roteiro criado com sucesso! Redirecionando para gerenciar roteiros...");
+        setTimeout(() => navigate("/roteiros/gerenciar"), 1200);
+      }
+    } catch (error) {
+      setError("Erro ao criar roteiro: " + (error.response?.data?.error || error.message));
+    } finally {
+      setCriandoRoteiro(false);
+    }
+  };
+
   // Exibir todos os roteiros carregados, aplicar filtro de tipo e nome normalmente
   let roteirosFiltrados = roteiros.filter(r =>
     !filtroNome ||
@@ -714,6 +851,21 @@ export function SelecionarRoteiro() {
     );
   });
 
+  // Filtrar lojas para o modal de criar roteiro fixo
+  const lojasFiltradasNovoRoteiro = todasLojas.filter((loja) => {
+    if (!loja.ativo) return false;
+    if (novoRoteiroLojas.some((l) => l.id === loja.id)) return false;
+    if (!filtroLojaNovoRoteiro) return true;
+
+    const searchTerm = filtroLojaNovoRoteiro.toLowerCase();
+    return (
+      loja.nome.toLowerCase().includes(searchTerm) ||
+      loja.cidade.toLowerCase().includes(searchTerm) ||
+      loja.estado.toLowerCase().includes(searchTerm) ||
+      loja.endereco?.toLowerCase().includes(searchTerm)
+    );
+  });
+
   if (loading) return <PageLoader />;
 
   return (
@@ -728,6 +880,11 @@ export function SelecionarRoteiro() {
             icon="🗺️"
           />
           <div className="flex items-center gap-2 mt-2 md:mt-0">
+            {isAdmin && (
+              <button className="btn-primary" onClick={abrirModalCriarRoteiro}>
+                ➕ Criar Roteiro Fixo
+              </button>
+            )}
             <button
               className={`px-4 py-2 rounded-lg font-semibold border-2 transition-colors ${filtroTipoRoteiro === "bolinha" ? "bg-blue-500 text-white border-blue-700" : "bg-white text-blue-700 border-blue-300 hover:bg-blue-100"}`}
               onClick={() => setFiltroTipoRoteiro("bolinha")}
@@ -830,9 +987,23 @@ export function SelecionarRoteiro() {
                   }
                 >
                   <div className="flex flex-col mb-4">
-                    <h3 className="text-xl font-bold text-primary mb-2">
-                      {roteiro.zona}
-                    </h3>
+                    <div className="flex items-start justify-between gap-2 mb-2">
+                      <h3 className="text-xl font-bold text-primary">
+                        {roteiro.zona}
+                      </h3>
+                      {isAdmin && (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            deletarRoteiro(roteiro);
+                          }}
+                          className="text-red-600 hover:text-red-800 shrink-0"
+                          title="Excluir roteiro"
+                        >
+                          🗑️
+                        </button>
+                      )}
+                    </div>
                     {renderMapaAdmin(roteiro)}
 
                     <div className="flex items-center justify-between">
@@ -1159,11 +1330,25 @@ export function SelecionarRoteiro() {
                       >
                         {roteiro.zona}
                       </h3>
-                      {possuiAlertaFinalizacao ? (
-                        <Badge variant="warning">⚠️ Finalizado com alerta</Badge>
-                      ) : (
-                        <Badge variant="success">✅ Finalizado sem pendências</Badge>
-                      )}
+                      <div className="flex items-center gap-2">
+                        {possuiAlertaFinalizacao ? (
+                          <Badge variant="warning">⚠️ Finalizado com alerta</Badge>
+                        ) : (
+                          <Badge variant="success">✅ Finalizado sem pendências</Badge>
+                        )}
+                        {isAdmin && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              deletarRoteiro(roteiro);
+                            }}
+                            className="text-red-600 hover:text-red-800 shrink-0"
+                            title="Excluir roteiro"
+                          >
+                            🗑️
+                          </button>
+                        )}
+                      </div>
                     </div>
                     {renderMapaAdmin(roteiro)}
 
@@ -1590,6 +1775,230 @@ export function SelecionarRoteiro() {
                   className="px-6 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition-colors"
                 >
                   Fechar
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal de Criar Roteiro Fixo */}
+      {showModalCriarRoteiro && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-lg shadow-xl max-w-4xl w-full max-h-[90vh] overflow-hidden flex flex-col">
+            {/* Header do Modal */}
+            <div className="bg-linear-to-r from-blue-600 to-blue-700 text-white p-6">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h2 className="text-2xl font-bold">➕ Criar Roteiro Fixo</h2>
+                  <p className="text-blue-100 mt-1">
+                    Defina os dados e a ordem de visita das lojas
+                  </p>
+                </div>
+                <button
+                  onClick={fecharModalCriarRoteiro}
+                  className="text-white hover:text-gray-200 text-3xl font-bold"
+                >
+                  ×
+                </button>
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-6 space-y-6">
+              {/* Dados do roteiro */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="text-sm font-semibold text-gray-700 block mb-1">
+                    Data *
+                  </label>
+                  <input
+                    type="date"
+                    value={novoRoteiro.data}
+                    onChange={(e) => setNovoRoteiro({ ...novoRoteiro, data: e.target.value })}
+                    className="input-field"
+                    required
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    {novoRoteiro.data === DATA_ROTEIRO_FIXO
+                      ? "Data padrão dos roteiros fixos — deixe assim para o roteiro aparecer nesta tela."
+                      : "Data diferente da padrão dos roteiros fixos — o roteiro não vai aparecer nesta tela, só em \"Gerenciar Roteiros\"."}
+                  </p>
+                </div>
+                <div>
+                  <label className="text-sm font-semibold text-gray-700 block mb-1">
+                    Zona
+                  </label>
+                  <input
+                    type="text"
+                    value={novoRoteiro.zona}
+                    onChange={(e) => setNovoRoteiro({ ...novoRoteiro, zona: e.target.value })}
+                    className="input-field"
+                    placeholder="Ex: Segunda - Zona Norte"
+                  />
+                </div>
+                <div>
+                  <label className="text-sm font-semibold text-gray-700 block mb-1">
+                    Estado
+                  </label>
+                  <input
+                    type="text"
+                    value={novoRoteiro.estado}
+                    onChange={(e) => setNovoRoteiro({ ...novoRoteiro, estado: e.target.value })}
+                    className="input-field"
+                    placeholder="Ex: PR"
+                  />
+                </div>
+                <div>
+                  <label className="text-sm font-semibold text-gray-700 block mb-1">
+                    Cidade
+                  </label>
+                  <input
+                    type="text"
+                    value={novoRoteiro.cidade}
+                    onChange={(e) => setNovoRoteiro({ ...novoRoteiro, cidade: e.target.value })}
+                    className="input-field"
+                    placeholder="Ex: Curitiba"
+                  />
+                </div>
+                <div>
+                  <label className="text-sm font-semibold text-gray-700 block mb-1">
+                    Funcionário Responsável
+                  </label>
+                  <select
+                    value={novoRoteiro.funcionarioId}
+                    onChange={(e) => setNovoRoteiro({ ...novoRoteiro, funcionarioId: e.target.value })}
+                    className="select-field"
+                  >
+                    <option value="">-- Não atribuído --</option>
+                    {funcionarios.map((func) => (
+                      <option key={func.id} value={func.id}>
+                        {func.nome}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-sm font-semibold text-gray-700 block mb-1">
+                    Saldo Restante (R$)
+                  </label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={novoRoteiro.saldoRestante}
+                    onChange={(e) => setNovoRoteiro({ ...novoRoteiro, saldoRestante: e.target.value })}
+                    className="input-field"
+                  />
+                </div>
+                <div className="md:col-span-2">
+                  <label className="text-sm font-semibold text-gray-700 block mb-1">
+                    Observações
+                  </label>
+                  <textarea
+                    rows={2}
+                    value={novoRoteiro.observacoes}
+                    onChange={(e) => setNovoRoteiro({ ...novoRoteiro, observacoes: e.target.value })}
+                    className="input-field"
+                    placeholder="Observações sobre este roteiro..."
+                  />
+                </div>
+              </div>
+
+              {/* Seletor de lojas com ordem de visita */}
+              <div>
+                <h3 className="text-md font-bold text-gray-900 mb-2">
+                  Lojas (ordem de visita)
+                </h3>
+
+                {novoRoteiroLojas.length > 0 ? (
+                  <div className="space-y-2 mb-4">
+                    {novoRoteiroLojas.map((loja, index) => (
+                      <div
+                        key={loja.id}
+                        className="flex items-center gap-2 p-2 bg-blue-50 border border-blue-200 rounded-lg"
+                      >
+                        <span className="font-bold text-blue-700 w-6 text-center">{index + 1}.</span>
+                        <div className="flex-1">
+                          <p className="text-sm font-semibold text-gray-900">{loja.nome}</p>
+                          <p className="text-xs text-gray-600">{loja.cidade} - {loja.estado}</p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => moverLojaNovoRoteiro(index, -1)}
+                          disabled={index === 0}
+                          className="px-2 py-1 rounded bg-white border border-gray-300 hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed"
+                          title="Mover para cima"
+                        >
+                          ⬆️
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => moverLojaNovoRoteiro(index, 1)}
+                          disabled={index === novoRoteiroLojas.length - 1}
+                          className="px-2 py-1 rounded bg-white border border-gray-300 hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed"
+                          title="Mover para baixo"
+                        >
+                          ⬇️
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => removerLojaDoNovoRoteiro(loja.id)}
+                          className="px-2 py-1 rounded bg-red-50 text-red-600 border border-red-200 hover:bg-red-100"
+                          title="Remover"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-sm text-gray-500 mb-4">
+                    Nenhuma loja selecionada ainda. Pode criar o roteiro sem lojas e adicioná-las depois em "Gerenciar Roteiros".
+                  </p>
+                )}
+
+                <input
+                  type="text"
+                  placeholder="🔍 Buscar loja para adicionar..."
+                  value={filtroLojaNovoRoteiro}
+                  onChange={(e) => setFiltroLojaNovoRoteiro(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg mb-2 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                />
+                <div className="max-h-48 overflow-y-auto grid grid-cols-1 md:grid-cols-2 gap-2">
+                  {lojasFiltradasNovoRoteiro.map((loja) => (
+                    <button
+                      type="button"
+                      key={loja.id}
+                      onClick={() => adicionarLojaAoNovoRoteiro(loja)}
+                      className="text-left p-2 bg-white border border-gray-200 rounded-lg hover:border-blue-400 hover:bg-blue-50 transition-colors"
+                    >
+                      <p className="text-sm font-semibold text-gray-900">➕ {loja.nome}</p>
+                      <p className="text-xs text-gray-600">{loja.cidade} - {loja.estado}</p>
+                    </button>
+                  ))}
+                  {lojasFiltradasNovoRoteiro.length === 0 && (
+                    <p className="text-sm text-gray-500 col-span-2 text-center py-4">
+                      Nenhuma loja encontrada
+                    </p>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Footer do Modal */}
+            <div className="p-4 border-t border-gray-200 bg-gray-50">
+              <div className="flex items-center justify-end gap-3">
+                <button
+                  onClick={fecharModalCriarRoteiro}
+                  className="px-6 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition-colors"
+                >
+                  Cancelar
+                </button>
+                <button
+                  onClick={criarRoteiroFixo}
+                  disabled={criandoRoteiro}
+                  className="btn-primary disabled:opacity-50"
+                >
+                  {criandoRoteiro ? "Criando..." : "✓ Criar Roteiro"}
                 </button>
               </div>
             </div>
