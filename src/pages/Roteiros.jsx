@@ -150,6 +150,19 @@ export function Roteiros() {
   const [observacoesEditando, setObservacoesEditando] = useState({});
   const [localizacoesRotas, setLocalizacoesRotas] = useState({});
   const [mapaExpandido, setMapaExpandido] = useState(null);
+  const [showModalCriarRoteiro, setShowModalCriarRoteiro] = useState(false);
+  const [novoRoteiro, setNovoRoteiro] = useState({
+    data: "",
+    zona: "",
+    estado: "",
+    cidade: "",
+    funcionarioId: "",
+    observacoes: "",
+    saldoRestante: 500,
+  });
+  const [novoRoteiroLojas, setNovoRoteiroLojas] = useState([]);
+  const [filtroLojaNovoRoteiro, setFiltroLojaNovoRoteiro] = useState("");
+  const [criandoRoteiro, setCriandoRoteiro] = useState(false);
 
   useEffect(() => {
     carregarRoteiros();
@@ -378,6 +391,117 @@ export function Roteiros() {
     }
   };
 
+  const deletarRoteiro = async (roteiro) => {
+    const confirmar = window.confirm(
+      `Isso vai apagar todas as movimentações registradas no roteiro "${roteiro.zona || roteiro.nome || "sem nome"}". Tem certeza?`
+    );
+    if (!confirmar) return;
+
+    try {
+      setError("");
+      await api.delete(`/roteiros/${roteiro.id}`);
+      setSuccess("Roteiro deletado com sucesso!");
+      await carregarRoteiros();
+      return;
+    } catch (error) {
+      const precisaForce =
+        error.response?.status === 400 &&
+        /force=true/i.test(error.response?.data?.error || "");
+
+      if (!precisaForce) {
+        setError("Erro ao deletar roteiro: " + (error.response?.data?.error || error.message));
+        return;
+      }
+    }
+
+    const confirmarForce = window.confirm(
+      "Este roteiro já está em andamento ou concluído. Excluir mesmo assim?"
+    );
+    if (!confirmarForce) return;
+
+    try {
+      setError("");
+      await api.delete(`/roteiros/${roteiro.id}?force=true`);
+      setSuccess("Roteiro deletado com sucesso!");
+      await carregarRoteiros();
+    } catch (error) {
+      setError("Erro ao deletar roteiro: " + (error.response?.data?.error || error.message));
+    }
+  };
+
+  const abrirModalCriarRoteiro = () => {
+    setNovoRoteiro({
+      data: "",
+      zona: "",
+      estado: "",
+      cidade: "",
+      funcionarioId: "",
+      observacoes: "",
+      saldoRestante: 500,
+    });
+    setNovoRoteiroLojas([]);
+    setFiltroLojaNovoRoteiro("");
+    setShowModalCriarRoteiro(true);
+  };
+
+  const fecharModalCriarRoteiro = () => {
+    setShowModalCriarRoteiro(false);
+  };
+
+  const adicionarLojaAoNovoRoteiro = (loja) => {
+    setNovoRoteiroLojas((prev) =>
+      prev.some((l) => l.id === loja.id) ? prev : [...prev, loja]
+    );
+  };
+
+  const removerLojaDoNovoRoteiro = (lojaId) => {
+    setNovoRoteiroLojas((prev) => prev.filter((l) => l.id !== lojaId));
+  };
+
+  const moverLojaNovoRoteiro = (index, direcao) => {
+    setNovoRoteiroLojas((prev) => {
+      const destino = index + direcao;
+      if (destino < 0 || destino >= prev.length) return prev;
+      const copia = [...prev];
+      [copia[index], copia[destino]] = [copia[destino], copia[index]];
+      return copia;
+    });
+  };
+
+  const criarRoteiroFixo = async () => {
+    if (!novoRoteiro.data) {
+      setError("Informe a data do roteiro.");
+      return;
+    }
+
+    try {
+      setCriandoRoteiro(true);
+      setError("");
+      const payload = {
+        data: novoRoteiro.data,
+        zona: novoRoteiro.zona || undefined,
+        estado: novoRoteiro.estado || undefined,
+        cidade: novoRoteiro.cidade || undefined,
+        funcionarioId: novoRoteiro.funcionarioId || undefined,
+        observacoes: novoRoteiro.observacoes || undefined,
+        saldoRestante:
+          novoRoteiro.saldoRestante !== "" && novoRoteiro.saldoRestante !== null
+            ? Number(novoRoteiro.saldoRestante)
+            : undefined,
+        lojaIds: novoRoteiroLojas.map((l) => l.id),
+      };
+
+      await api.post("/roteiros", payload);
+      setSuccess("Roteiro criado com sucesso!");
+      fecharModalCriarRoteiro();
+      setTimeout(() => navigate("/roteiros/gerenciar"), 1200);
+    } catch (error) {
+      setError("Erro ao criar roteiro: " + (error.response?.data?.error || error.message));
+    } finally {
+      setCriandoRoteiro(false);
+    }
+  };
+
   if (loading) return <PageLoader />;
 
   // Filtrar roteiros do dia atual
@@ -430,6 +554,21 @@ export function Roteiros() {
     );
   });
 
+  // Filtrar lojas para o modal de criar roteiro fixo
+  const lojasFiltradasNovoRoteiro = todasLojas.filter((loja) => {
+    if (!loja.ativo) return false;
+    if (novoRoteiroLojas.some((l) => l.id === loja.id)) return false;
+    if (!filtroLojaNovoRoteiro) return true;
+
+    const searchTerm = filtroLojaNovoRoteiro.toLowerCase();
+    return (
+      loja.nome.toLowerCase().includes(searchTerm) ||
+      loja.cidade.toLowerCase().includes(searchTerm) ||
+      loja.estado.toLowerCase().includes(searchTerm) ||
+      loja.endereco?.toLowerCase().includes(searchTerm)
+    );
+  });
+
   // --- ROTEIROS BOLINHA ---
   const bolinhaRoteiros = roteirosHoje.filter(r => r.tipo === 'bolinha');
   const roteirosNormais = roteirosHoje.filter(r => r.tipo !== 'bolinha');
@@ -466,14 +605,17 @@ export function Roteiros() {
           </div>
         )}
 
-        {/* Botão para gerenciar roteiros (apenas admin) */}
+        {/* Botões para gerenciar roteiros (apenas admin) */}
         {usuario?.role === "ADMIN" && (
-          <div className="mb-6">
+          <div className="mb-6 flex flex-wrap gap-2">
             <button
               onClick={() => navigate("/roteiros/gerenciar")}
               className="btn-secondary"
             >
               ⚙️ Gerenciar Roteiros
+            </button>
+            <button onClick={abrirModalCriarRoteiro} className="btn-primary">
+              ➕ Criar Roteiro Fixo
             </button>
           </div>
         )}
@@ -560,9 +702,20 @@ export function Roteiros() {
                   } : undefined}
                 >
                   <div className="flex flex-col h-full">
-                    <h3 className="text-lg font-bold text-gray-900 mb-2">
-                      {roteiro.zona}
-                    </h3>
+                    <div className="flex items-start justify-between gap-2 mb-2">
+                      <h3 className="text-lg font-bold text-gray-900">
+                        {roteiro.zona}
+                      </h3>
+                      {isAdmin && (
+                        <button
+                          onClick={() => deletarRoteiro(roteiro)}
+                          className="text-red-600 hover:text-red-800 shrink-0"
+                          title="Excluir roteiro"
+                        >
+                          🗑️
+                        </button>
+                      )}
+                    </div>
                     {isAdmin && (
                       <div className="mb-2">
                         <label className="text-xs text-gray-600 block mb-1">Funcionário:</label>
@@ -706,9 +859,20 @@ export function Roteiros() {
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {roteirosEmAndamento.map((roteiro) => (
                 <div key={roteiro.id} className={`card opacity-75 ${roteiro.zona === 'Roteiro Coringa' ? 'bg-purple-200 border-2 border-purple-400 rounded-xl' : 'bg-gray-100'}`}>
-                  <h3 className="text-lg font-bold text-gray-900 mb-2">
-                    {roteiro.nome}
-                  </h3>
+                  <div className="flex items-start justify-between gap-2 mb-2">
+                    <h3 className="text-lg font-bold text-gray-900">
+                      {roteiro.nome}
+                    </h3>
+                    {isAdmin && (
+                      <button
+                        onClick={() => deletarRoteiro(roteiro)}
+                        className="text-red-600 hover:text-red-800 shrink-0"
+                        title="Excluir roteiro"
+                      >
+                        🗑️
+                      </button>
+                    )}
+                  </div>
                   <p className="text-sm text-gray-600 mb-2">
                     <strong>Funcionário:</strong> {roteiro.funcionarioNome}
                   </p>
@@ -750,9 +914,20 @@ export function Roteiros() {
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {roteirosConcluidos.map((roteiro) => (
                 <div key={roteiro.id} className={`card ${roteiro.zona === 'Roteiro Coringa' ? 'bg-purple-200 border-2 border-purple-400 rounded-xl' : 'bg-green-50'}`}>
-                  <h3 className="text-lg font-bold text-gray-900 mb-2">
-                    {roteiro.nome}
-                  </h3>
+                  <div className="flex items-start justify-between gap-2 mb-2">
+                    <h3 className="text-lg font-bold text-gray-900">
+                      {roteiro.nome}
+                    </h3>
+                    {isAdmin && (
+                      <button
+                        onClick={() => deletarRoteiro(roteiro)}
+                        className="text-red-600 hover:text-red-800 shrink-0"
+                        title="Excluir roteiro"
+                      >
+                        🗑️
+                      </button>
+                    )}
+                  </div>
                   <p className="text-sm text-gray-600 mb-2">
                     <strong>Funcionário:</strong> {roteiro.funcionarioNome}
                   </p>
@@ -947,6 +1122,225 @@ export function Roteiros() {
                   className="px-6 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition-colors"
                 >
                   Fechar
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal de Criar Roteiro Fixo */}
+      {showModalCriarRoteiro && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-lg shadow-xl max-w-4xl w-full max-h-[90vh] overflow-hidden flex flex-col">
+            {/* Header do Modal */}
+            <div className="bg-gradient-to-r from-blue-600 to-blue-700 text-white p-6">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h2 className="text-2xl font-bold">➕ Criar Roteiro Fixo</h2>
+                  <p className="text-blue-100 mt-1">
+                    Defina os dados e a ordem de visita das lojas
+                  </p>
+                </div>
+                <button
+                  onClick={fecharModalCriarRoteiro}
+                  className="text-white hover:text-gray-200 text-3xl font-bold"
+                >
+                  ×
+                </button>
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-6 space-y-6">
+              {/* Dados do roteiro */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="text-sm font-semibold text-gray-700 block mb-1">
+                    Data *
+                  </label>
+                  <input
+                    type="date"
+                    value={novoRoteiro.data}
+                    onChange={(e) => setNovoRoteiro({ ...novoRoteiro, data: e.target.value })}
+                    className="input-field"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="text-sm font-semibold text-gray-700 block mb-1">
+                    Zona
+                  </label>
+                  <input
+                    type="text"
+                    value={novoRoteiro.zona}
+                    onChange={(e) => setNovoRoteiro({ ...novoRoteiro, zona: e.target.value })}
+                    className="input-field"
+                    placeholder="Ex: Segunda - Zona Norte"
+                  />
+                </div>
+                <div>
+                  <label className="text-sm font-semibold text-gray-700 block mb-1">
+                    Estado
+                  </label>
+                  <input
+                    type="text"
+                    value={novoRoteiro.estado}
+                    onChange={(e) => setNovoRoteiro({ ...novoRoteiro, estado: e.target.value })}
+                    className="input-field"
+                    placeholder="Ex: PR"
+                  />
+                </div>
+                <div>
+                  <label className="text-sm font-semibold text-gray-700 block mb-1">
+                    Cidade
+                  </label>
+                  <input
+                    type="text"
+                    value={novoRoteiro.cidade}
+                    onChange={(e) => setNovoRoteiro({ ...novoRoteiro, cidade: e.target.value })}
+                    className="input-field"
+                    placeholder="Ex: Curitiba"
+                  />
+                </div>
+                <div>
+                  <label className="text-sm font-semibold text-gray-700 block mb-1">
+                    Funcionário Responsável
+                  </label>
+                  <select
+                    value={novoRoteiro.funcionarioId}
+                    onChange={(e) => setNovoRoteiro({ ...novoRoteiro, funcionarioId: e.target.value })}
+                    className="select-field"
+                  >
+                    <option value="">-- Não atribuído --</option>
+                    {funcionarios.map((func) => (
+                      <option key={func.id} value={func.id}>
+                        {func.nome}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-sm font-semibold text-gray-700 block mb-1">
+                    Saldo Restante (R$)
+                  </label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={novoRoteiro.saldoRestante}
+                    onChange={(e) => setNovoRoteiro({ ...novoRoteiro, saldoRestante: e.target.value })}
+                    className="input-field"
+                  />
+                </div>
+                <div className="md:col-span-2">
+                  <label className="text-sm font-semibold text-gray-700 block mb-1">
+                    Observações
+                  </label>
+                  <textarea
+                    rows={2}
+                    value={novoRoteiro.observacoes}
+                    onChange={(e) => setNovoRoteiro({ ...novoRoteiro, observacoes: e.target.value })}
+                    className="input-field"
+                    placeholder="Observações sobre este roteiro..."
+                  />
+                </div>
+              </div>
+
+              {/* Seletor de lojas com ordem de visita */}
+              <div>
+                <h3 className="text-md font-bold text-gray-900 mb-2">
+                  Lojas (ordem de visita)
+                </h3>
+
+                {novoRoteiroLojas.length > 0 ? (
+                  <div className="space-y-2 mb-4">
+                    {novoRoteiroLojas.map((loja, index) => (
+                      <div
+                        key={loja.id}
+                        className="flex items-center gap-2 p-2 bg-blue-50 border border-blue-200 rounded-lg"
+                      >
+                        <span className="font-bold text-blue-700 w-6 text-center">{index + 1}.</span>
+                        <div className="flex-1">
+                          <p className="text-sm font-semibold text-gray-900">{loja.nome}</p>
+                          <p className="text-xs text-gray-600">{loja.cidade} - {loja.estado}</p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => moverLojaNovoRoteiro(index, -1)}
+                          disabled={index === 0}
+                          className="px-2 py-1 rounded bg-white border border-gray-300 hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed"
+                          title="Mover para cima"
+                        >
+                          ⬆️
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => moverLojaNovoRoteiro(index, 1)}
+                          disabled={index === novoRoteiroLojas.length - 1}
+                          className="px-2 py-1 rounded bg-white border border-gray-300 hover:bg-gray-100 disabled:opacity-30 disabled:cursor-not-allowed"
+                          title="Mover para baixo"
+                        >
+                          ⬇️
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => removerLojaDoNovoRoteiro(loja.id)}
+                          className="px-2 py-1 rounded bg-red-50 text-red-600 border border-red-200 hover:bg-red-100"
+                          title="Remover"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-sm text-gray-500 mb-4">
+                    Nenhuma loja selecionada ainda. Pode criar o roteiro sem lojas e adicioná-las depois em "Gerenciar Roteiros".
+                  </p>
+                )}
+
+                <input
+                  type="text"
+                  placeholder="🔍 Buscar loja para adicionar..."
+                  value={filtroLojaNovoRoteiro}
+                  onChange={(e) => setFiltroLojaNovoRoteiro(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg mb-2 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                />
+                <div className="max-h-48 overflow-y-auto grid grid-cols-1 md:grid-cols-2 gap-2">
+                  {lojasFiltradasNovoRoteiro.map((loja) => (
+                    <button
+                      type="button"
+                      key={loja.id}
+                      onClick={() => adicionarLojaAoNovoRoteiro(loja)}
+                      className="text-left p-2 bg-white border border-gray-200 rounded-lg hover:border-blue-400 hover:bg-blue-50 transition-colors"
+                    >
+                      <p className="text-sm font-semibold text-gray-900">➕ {loja.nome}</p>
+                      <p className="text-xs text-gray-600">{loja.cidade} - {loja.estado}</p>
+                    </button>
+                  ))}
+                  {lojasFiltradasNovoRoteiro.length === 0 && (
+                    <p className="text-sm text-gray-500 col-span-2 text-center py-4">
+                      Nenhuma loja encontrada
+                    </p>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Footer do Modal */}
+            <div className="p-4 border-t border-gray-200 bg-gray-50">
+              <div className="flex items-center justify-end gap-3">
+                <button
+                  onClick={fecharModalCriarRoteiro}
+                  className="px-6 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 transition-colors"
+                >
+                  Cancelar
+                </button>
+                <button
+                  onClick={criarRoteiroFixo}
+                  disabled={criandoRoteiro}
+                  className="btn-primary disabled:opacity-50"
+                >
+                  {criandoRoteiro ? "Criando..." : "✓ Criar Roteiro"}
                 </button>
               </div>
             </div>
