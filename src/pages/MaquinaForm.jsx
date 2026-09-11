@@ -23,6 +23,8 @@ export function MaquinaForm() {
     jogadasPremium: "",
     percentualAlertaEstoque: "",
     percentualComissao: "",
+    tipoPagamentoLoja: "comissao",
+    valorAluguel: "",
     localizacao: "",
     ativo: true,
     machinePayPosId: "",
@@ -75,6 +77,8 @@ export function MaquinaForm() {
         jogadasPremium: response.data.jogadasPremium || "",
         percentualAlertaEstoque: response.data.percentualAlertaEstoque || 20,
         percentualComissao: response.data.percentualComissao || 0,
+        tipoPagamentoLoja: response.data.tipoPagamentoLoja || "comissao",
+        valorAluguel: response.data.valorAluguel || 0,
         localizacao: response.data.localizacao || "",
 
         ativo: response.data.ativo !== undefined ? response.data.ativo : true,
@@ -144,6 +148,9 @@ export function MaquinaForm() {
         percentualAlertaEstoque:
           parseInt(formData.percentualAlertaEstoque, 10) || 20,
         percentualComissao: parseFloat(formData.percentualComissao) || 0,
+        tipoPagamentoLoja:
+          formData.tipoPagamentoLoja === "aluguel" ? "aluguel" : "comissao",
+        valorAluguel: parseFloat(formData.valorAluguel) || 0,
         localizacao: formData.localizacao?.trim() || null,
         ativo: formData.ativo,
         machinePayPosId: formData.machinePayPosId?.trim() || null,
@@ -423,24 +430,77 @@ export function MaquinaForm() {
                   </p>
                 </div>
 
-                <div>
+                <div className="md:col-span-2">
                   <label className="block text-sm font-semibold text-gray-700 mb-2">
-                    💰 Percentual de Comissão (%)
+                    💰 Pagamento ao Ponto (Loja)
                   </label>
-                  <input
-                    type="number"
-                    name="percentualComissao"
-                    value={formData.percentualComissao}
-                    onChange={handleChange}
-                    className="input-field"
-                    placeholder="Ex: 10"
-                    min="0"
-                    max="100"
-                    step="0.01"
-                  />
-                  <p className="text-xs text-gray-500 mt-1">
-                    Percentual de comissão sobre o lucro da máquina (0-100%)
-                  </p>
+                  <div className="flex flex-col sm:flex-row gap-3 mb-3">
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="tipoPagamentoLoja"
+                        value="comissao"
+                        checked={formData.tipoPagamentoLoja === "comissao"}
+                        onChange={handleChange}
+                        className="w-4 h-4 text-primary focus:ring-2 focus:ring-primary"
+                      />
+                      <span className="text-sm text-gray-700">
+                        Comissão (% sobre o lucro)
+                      </span>
+                    </label>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="radio"
+                        name="tipoPagamentoLoja"
+                        value="aluguel"
+                        checked={formData.tipoPagamentoLoja === "aluguel"}
+                        onChange={handleChange}
+                        className="w-4 h-4 text-primary focus:ring-2 focus:ring-primary"
+                      />
+                      <span className="text-sm text-gray-700">
+                        Aluguel (valor fixo mensal)
+                      </span>
+                    </label>
+                  </div>
+
+                  {formData.tipoPagamentoLoja === "aluguel" ? (
+                    <>
+                      <input
+                        type="number"
+                        name="valorAluguel"
+                        value={formData.valorAluguel}
+                        onChange={handleChange}
+                        className="input-field"
+                        placeholder="Ex: 300.00"
+                        min="0"
+                        step="0.01"
+                      />
+                      <p className="text-xs text-gray-500 mt-1">
+                        Valor fixo mensal (R$) pago à loja como aluguel desta
+                        máquina. Esse valor entra como custo da máquina e é
+                        descontado do lucro (rateado pelo período) para gerar
+                        o lucro líquido no relatório do ponto.
+                      </p>
+                    </>
+                  ) : (
+                    <>
+                      <input
+                        type="number"
+                        name="percentualComissao"
+                        value={formData.percentualComissao}
+                        onChange={handleChange}
+                        className="input-field"
+                        placeholder="Ex: 10"
+                        min="0"
+                        max="100"
+                        step="0.01"
+                      />
+                      <p className="text-xs text-gray-500 mt-1">
+                        Percentual de comissão sobre o lucro da máquina
+                        (0-100%)
+                      </p>
+                    </>
+                  )}
                 </div>
               </div>
             </div>

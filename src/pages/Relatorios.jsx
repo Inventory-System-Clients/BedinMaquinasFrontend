@@ -51,6 +51,17 @@ export function Relatorios() {
     return Number.isFinite(parsed) ? parsed : 0;
   };
 
+  // Quantidade de dias do período do relatório (inclusive), usada para
+  // ratear o valor mensal de aluguel das máquinas em modo "aluguel".
+  const calcularDiasPeriodo = (inicio, fim) => {
+    if (!inicio || !fim) return 30;
+    const dataInicioObj = new Date(`${inicio}T00:00:00`);
+    const dataFimObj = new Date(`${fim}T00:00:00`);
+    const diffMs = dataFimObj.getTime() - dataInicioObj.getTime();
+    const dias = Math.round(diffMs / (24 * 60 * 60 * 1000)) + 1;
+    return dias > 0 ? dias : 30;
+  };
+
   const obterDataMovimentacao = (movimentacao) => {
     return new Date(
       movimentacao?.dataColeta ||
@@ -524,18 +535,27 @@ export function Relatorios() {
       // Atualizar totais gerais
       if (!relatorioData.totais) relatorioData.totais = {};
       relatorioData.totais.comissao = totalComissao;
+      relatorioData.totais.aluguel = 0;
       relatorioData.totais.lucroComDescontoComissao =
         totalLucro - totalComissao;
 
-      // Atualizar máquinas com detalhes de comissão agregados no período e fallback por percentual cadastrado
+      const diasPeriodo = calcularDiasPeriodo(dataInicio, dataFim);
+
+      // Atualizar máquinas com detalhes de comissão/aluguel agregados no período e fallback por cadastro
       if (Array.isArray(relatorioData.maquinas)) {
         const percentualPorMaquina = new Map();
+        const pagamentoPorMaquina = new Map();
 
         maquinasDaLoja.forEach((maq) => {
           percentualPorMaquina.set(
             String(maq.id),
             toNumber(maq.percentualComissao ?? maq.percentual_comissao),
           );
+          pagamentoPorMaquina.set(String(maq.id), {
+            tipoPagamentoLoja:
+              maq.tipoPagamentoLoja ?? maq.tipo_pagamento_loja ?? "comissao",
+            valorAluguel: toNumber(maq.valorAluguel ?? maq.valor_aluguel),
+          });
         });
 
         const detalhesComissaoPorMaquina = new Map();
@@ -576,6 +596,32 @@ export function Relatorios() {
           const cartao = toNumber(maq.valoresEntrada?.cartao);
           const totalRecebimento = notas + cartao;
 
+          const pagamentoCadastro = pagamentoPorMaquina.get(maquinaId);
+          const tipoPagamentoLoja =
+            maq.maquina?.tipoPagamentoLoja ??
+            maq.maquina?.tipo_pagamento_loja ??
+            pagamentoCadastro?.tipoPagamentoLoja ??
+            "comissao";
+
+          if (tipoPagamentoLoja === "aluguel") {
+            const valorAluguelMensal =
+              toNumber(
+                maq.maquina?.valorAluguel ?? maq.maquina?.valor_aluguel,
+              ) || toNumber(pagamentoCadastro?.valorAluguel);
+
+            const valoresAluguel =
+              (valorAluguelMensal * diasPeriodo) / 30;
+
+            return {
+              ...maq,
+              tipoPagamentoLoja,
+              valoresComissao: 0,
+              valoresAluguel,
+              percentualComissaoAplicado: 0,
+              lucroComDescontoComissao: totalRecebimento - valoresAluguel,
+            };
+          }
+
           const percentualCadastro =
             toNumber(
               maq.maquina?.percentualComissao ??
@@ -607,7 +653,9 @@ export function Relatorios() {
 
           return {
             ...maq,
+            tipoPagamentoLoja,
             valoresComissao,
+            valoresAluguel: 0,
             percentualComissaoAplicado: percentualAplicado,
             lucroComDescontoComissao: totalRecebimento - valoresComissao,
           };
@@ -618,16 +666,24 @@ export function Relatorios() {
           0,
         );
 
+        const aluguelRecalculado = relatorioData.maquinas.reduce(
+          (acc, maq) => acc + toNumber(maq.valoresAluguel),
+          0,
+        );
+
         const lucroLiquidoRecalculado = relatorioData.maquinas.reduce(
           (acc, maq) => {
             const notas = toNumber(maq.valoresEntrada?.notas);
             const cartao = toNumber(maq.valoresEntrada?.cartao);
-            return acc + (notas + cartao - toNumber(maq.valoresComissao));
+            const descontos =
+              toNumber(maq.valoresComissao) + toNumber(maq.valoresAluguel);
+            return acc + (notas + cartao - descontos);
           },
           0,
         );
 
         relatorioData.totais.comissao = comissaoRecalculada;
+        relatorioData.totais.aluguel = aluguelRecalculado;
         relatorioData.totais.lucroComDescontoComissao = lucroLiquidoRecalculado;
       }
 
@@ -795,6 +851,7 @@ export function Relatorios() {
               dinheiro: 0,
               cartao: 0,
               comissao: 0,
+              aluguel: 0,
               conferidoTotal: 0,
               pelucias: 0,
               lucroLojaPeriodo: 0,
@@ -805,9 +862,10 @@ export function Relatorios() {
         const dinheiro = toNumber(maquina.valoresEntrada?.notas || 0);
         const cartao = toNumber(maquina.valoresEntrada?.cartao || 0);
         const comissao = toNumber(maquina.valoresComissao || 0);
+        const aluguel = toNumber(maquina.valoresAluguel || 0);
         const conferidoTotal = dinheiro + cartao;
         const pelucias = toNumber(maquina?.totais?.produtosSairam);
-        const lucroMaquinaPeriodo = conferidoTotal - comissao;
+        const lucroMaquinaPeriodo = conferidoTotal - comissao - aluguel;
         const mediaRecebidaPorPelucia = toNumber(
           maquina?.indicadoresFinanceiros?.mediaRecebidaPorPelucia,
         );
@@ -823,6 +881,7 @@ export function Relatorios() {
           dinheiro,
           cartao,
           comissao,
+          aluguel,
           conferidoTotal,
           pelucias,
           lucroMaquinaPeriodo,
@@ -834,6 +893,7 @@ export function Relatorios() {
         dadosLoja.totais.dinheiro += dinheiro;
         dadosLoja.totais.cartao += cartao;
         dadosLoja.totais.comissao += comissao;
+        dadosLoja.totais.aluguel += aluguel;
         dadosLoja.totais.conferidoTotal += conferidoTotal;
         dadosLoja.totais.pelucias += pelucias;
         dadosLoja.totais.lucroLojaPeriodo += lucroMaquinaPeriodo;
@@ -862,6 +922,10 @@ export function Relatorios() {
       );
       const totalComissao = lojasOrdenadas.reduce(
         (acc, loja) => acc + loja.totais.comissao,
+        0,
+      );
+      const totalAluguel = lojasOrdenadas.reduce(
+        (acc, loja) => acc + loja.totais.aluguel,
         0,
       );
       const totalConferido = lojasOrdenadas.reduce(
@@ -922,6 +986,7 @@ export function Relatorios() {
                   <td class="num">${formatarMoeda(linha.dinheiro)}</td>
                   <td class="num">${formatarMoeda(linha.cartao)}</td>
                   <td class="num">${formatarMoeda(linha.comissao)}</td>
+                  <td class="num">${formatarMoeda(linha.aluguel)}</td>
                   <td class="num">${formatarMoeda(linha.conferidoTotal)}</td>
                   <td class="num">${Math.round(linha.pelucias)}</td>
                   <td class="num">${formatarMoeda(linha.mediaRecebidaPorPelucia)}</td>
@@ -936,6 +1001,7 @@ export function Relatorios() {
               <td class="num">${formatarMoeda(loja.totais.dinheiro)}</td>
               <td class="num">${formatarMoeda(loja.totais.cartao)}</td>
               <td class="num">${formatarMoeda(loja.totais.comissao)}</td>
+              <td class="num">${formatarMoeda(loja.totais.aluguel)}</td>
               <td class="num">${formatarMoeda(loja.totais.conferidoTotal)}</td>
               <td class="num">${Math.round(loja.totais.pelucias)}</td>
               <td class="num">-</td>
@@ -1028,6 +1094,7 @@ export function Relatorios() {
                 <th>DINHEIRO</th>
                 <th>Conf. Cartão</th>
                 <th>Comissão</th>
+                <th>Aluguel</th>
                 <th>Conferido Total</th>
                 <th>Pelúcias (Qtd Saída)</th>
                 <th>Média recebida por pelúcia</th>
@@ -1045,6 +1112,7 @@ export function Relatorios() {
                 <td class="num">${formatarMoeda(totalDinheiro)}</td>
                 <td class="num">${formatarMoeda(totalCartao)}</td>
                 <td class="num">${formatarMoeda(totalComissao)}</td>
+                <td class="num">${formatarMoeda(totalAluguel)}</td>
                 <td class="num">${formatarMoeda(totalConferido)}</td>
                 <td class="num">${Math.round(totalPelucias)}</td>
                 <td class="num">-</td>
@@ -1564,7 +1632,7 @@ export function Relatorios() {
                 <span className="text-xl sm:text-2xl">💰</span>
                 Valores de Entrada (Lucro)
               </h4>
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 sm:gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3 sm:gap-4">
                 <div className="card bg-linear-to-br from-green-400 to-green-500 text-white">
                   <div className="text-2xl sm:text-3xl mb-2">💵</div>
                   <div className="text-xl sm:text-2xl font-bold">
@@ -1611,6 +1679,20 @@ export function Relatorios() {
                   </div>
                   <div className="text-sm opacity-90">Comissão Total Paga</div>
                 </div>
+                <div className="card bg-linear-to-br from-amber-600 to-amber-800 text-white">
+                  <div className="text-2xl sm:text-3xl mb-2">🏠</div>
+                  <div className="text-xl sm:text-2xl font-bold">
+                    R${" "}
+                    {(typeof totais.aluguel === "number"
+                      ? totais.aluguel
+                      : maquinas.reduce(
+                          (acc, m) => acc + (m.valoresAluguel || 0),
+                          0,
+                        )
+                    ).toFixed(2)}
+                  </div>
+                  <div className="text-sm opacity-90">Aluguel Total Pago</div>
+                </div>
                 <div className="card bg-linear-to-br from-green-700 to-green-900 text-white">
                   <div className="text-2xl sm:text-3xl mb-2">💸</div>
                   <div className="text-xl sm:text-2xl font-bold">
@@ -1622,11 +1704,14 @@ export function Relatorios() {
                             typeof totais.valoresEntrada?.total === "number"
                               ? totais.valoresEntrada.total
                               : 0;
-                          const totalComissao = maquinas.reduce(
-                            (acc, m) => acc + (m.valoresComissao || 0),
+                          const totalDescontos = maquinas.reduce(
+                            (acc, m) =>
+                              acc +
+                              (m.valoresComissao || 0) +
+                              (m.valoresAluguel || 0),
                             0,
                           );
-                          return totalRecebido - totalComissao;
+                          return totalRecebido - totalDescontos;
                         })()
                     ).toFixed(2)}
                   </div>
@@ -1757,7 +1842,7 @@ export function Relatorios() {
                           Valores de Entrada (Lucro da Máquina)
                         </span>
                       </h4>
-                      <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-4">
+                      <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-5 gap-2 sm:gap-4">
                         <div className="bg-linear-to-br from-green-400 to-green-500 text-white p-3 sm:p-5 rounded-xl shadow-lg">
                           <div className="text-2xl sm:text-4xl mb-1 sm:mb-2 text-center">
                             💵
@@ -1813,6 +1898,21 @@ export function Relatorios() {
                             Comissão Paga
                           </div>
                         </div>
+                        <div className="bg-linear-to-br from-amber-600 to-amber-800 text-white p-3 sm:p-5 rounded-xl shadow-lg">
+                          <div className="text-2xl sm:text-4xl mb-1 sm:mb-2 text-center">
+                            🏠
+                          </div>
+                          <div className="text-xl sm:text-3xl font-bold text-center">
+                            R${" "}
+                            {(typeof maquina.valoresAluguel === "number"
+                              ? maquina.valoresAluguel
+                              : 0
+                            ).toFixed(2)}
+                          </div>
+                          <div className="text-xs sm:text-sm text-center mt-1 sm:mt-2 opacity-90">
+                            Aluguel Pago
+                          </div>
+                        </div>
                         <div className="bg-linear-to-br from-green-700 to-green-900 text-white p-3 sm:p-5 rounded-xl shadow-lg col-span-2 lg:col-span-1">
                           <div className="text-2xl sm:text-4xl mb-1 sm:mb-2 text-center">
                             💸
@@ -1828,8 +1928,10 @@ export function Relatorios() {
                                   const cartao =
                                     maquina.valoresEntrada?.cartao || 0;
                                   const totalRecebido = notas + cartao;
-                                  const comissao = maquina.valoresComissao || 0;
-                                  return totalRecebido - comissao;
+                                  const descontos =
+                                    (maquina.valoresComissao || 0) +
+                                    (maquina.valoresAluguel || 0);
+                                  return totalRecebido - descontos;
                                 })()
                             ).toFixed(2)}
                           </div>
