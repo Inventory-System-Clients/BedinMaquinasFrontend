@@ -896,29 +896,8 @@ export function Movimentacoes() {
               <h3 className="text-lg font-bold text-gray-800 mb-3 mt-6">
                 💰 Valores de Entrada (Arrecadação)
               </h3>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-2">
-                    💵 Valor Entrada Notas (R$)
-                  </label>
-                  <input
-                    type="number"
-                    name="valorEntradaNotas"
-                    value={formData.valorEntradaNotas}
-                    onChange={handleChange}
-                    className="input-field"
-                    placeholder="0.00"
-                    min="0"
-                    step="0.01"
-                  />
-                  <p className="text-xs text-gray-500 mt-1">
-                    Valor total em notas coletadas
-                  </p>
-                </div>
-              </div>
               <p className="text-xs text-gray-500 mt-1">
-                O valor digital (cartão/PIX) é calculado automaticamente pelo sistema via Machine Pay.
+                O dinheiro e o cartão são lançados por ponto na tela Financeiro, não por máquina.
               </p>
 
               {/* Campos Antigos - Deprecated */}
