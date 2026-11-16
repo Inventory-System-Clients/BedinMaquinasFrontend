@@ -1,6 +1,12 @@
 // ...existing code...
-import { useState, useEffect, useCallback } from "react";
-import { Link } from "react-router-dom";
+import { useState, useEffect, useCallback, lazy, Suspense } from "react";
+import { Link, useNavigate } from "react-router-dom";
+import { Icone, Parallax, Reveal } from "../components/dashboard/fx";
+import { KpiCard, KpiDestaque, OpCard, SecaoCabecalho } from "../components/dashboard/Cards";
+import "../components/dashboard/dashboard.css";
+
+// Ilustração decorativa: carregada à parte para não atrasar os dados.
+const ClawMachine3D = lazy(() => import("../components/dashboard/ClawMachine3D"));
 import api from "../services/api";
 import { Navbar } from "../components/Navbar";
 import { Footer } from "../components/Footer";
@@ -304,6 +310,10 @@ export function Dashboard() {
     loading: true,
   });
   const [roteirosHoje, setRoteirosHoje] = useState([]);
+  const navigate = useNavigate();
+  // Feedback visual do botão Atualizar (os dados vêm do mesmo carregarDados).
+  const [atualizando, setAtualizando] = useState(false);
+  const [versaoDados, setVersaoDados] = useState(0);
 
   // Estados para busca e navegação
 
@@ -450,6 +460,16 @@ export function Dashboard() {
         }
     carregarDados();
   }, [carregarDados]);
+
+  const atualizarDashboard = async () => {
+    setAtualizando(true);
+    try {
+      await carregarDados();
+    } finally {
+      setAtualizando(false);
+      setVersaoDados((v) => v + 1);
+    }
+  };
 
   const carregarAlertasEstoqueLoja = async (lojasData) => {
     try {
@@ -1634,30 +1654,117 @@ export function Dashboard() {
     return <PageLoader />;
   }
 
-  return (
+  // ----- Valores derivados para o topo do dashboard (mesmos cálculos de antes) -----
+  const ehAdmin = usuario?.role === "ADMIN";
+  const diasSemanaDisplay = ["Domingo", "Segunda-feira", "Terça-feira", "Quarta-feira", "Quinta-feira", "Sexta-feira", "Sábado"];
+  const diaVariantes = [
+    [], // domingo
+    ["segunda"],
+    ["terça", "terca"],
+    ["quarta"],
+    ["quinta"],
+    ["sexta"],
+    [], // sábado
+  ];
+  const diaNomeDisplay = diasSemanaDisplay[new Date().getDay()];
+  const qtdRoteirosHoje = roteirosHoje.filter((r) => {
+    const zona = (r.zona || "").toLowerCase();
+    return diaVariantes[new Date().getDay()].some((v) => zona.startsWith(v));
+  }).length;
+  const totaisSemana = stats.balanco?.totais;
+  const premiosSaidos = totaisSemana?.totalProdutosSairam ?? totaisSemana?.totalSairam ?? 0;
+  const totalAlertas = stats.alertas.length + alertasEstoqueLoja.length;
+  const temAlertaCritico = stats.alertas.some((a) => a.nivelAlerta === "CRÍTICO");
+  const nivelAlertas = totalAlertas === 0 ? "ok" : temAlertaCritico ? "crit" : "warn";
+  const dataCurta = (iso) => (iso ? new Date(iso).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit" }) : "");
+  const periodoSemana = stats.balanco?.periodo ? `${dataCurta(stats.balanco.periodo.inicio)} a ${dataCurta(stats.balanco.periodo.fim)}` : "";
+  const formatarMoeda = (v) => v.toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
+  // Ranking visual: as 6 primeiras lojas (o backend já ordena por faturamento).
+  const rankingLojas = (stats.balanco?.distribuicaoLojas || []).slice(0, 6);
+  const maiorFaturamentoLoja = Math.max(0, ...rankingLojas.map((l) => Number(l.faturamento) || 0));
+  const primeiroNome = (usuario?.nome || "").trim().split(/\s+/)[0];
+  const hojeTexto = new Date().toLocaleDateString("pt-BR", { weekday: "long", day: "numeric", month: "long" });
+  const hojeExtenso = hojeTexto.charAt(0).toUpperCase() + hojeTexto.slice(1);
 
-    <div className="min-h-screen bg-background-light bg-pattern teddy-pattern">
-      {/* Header com boas-vindas */}
+  return (
+    <div className="bm-dash min-h-screen">
       <Navbar />
       <AlertaRoteirosPendentes />
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8">
         {/* Alerta de manutenção urgente atribuída ao funcionário */}
         {manutencoesUrgentes.length > 0 && (
-          <div className="bg-red-100 border-l-4 border-red-500 p-4 mb-4 animate-pulse">
-            <div className="font-bold text-red-700 text-lg mb-1 flex items-center gap-2">
-              <span>⚠️</span> Atenção: Você possui {manutencoesUrgentes.length} manutenção(ões) urgente(s) atribuída(s)!
+          <div className="mb-5 flex gap-3 rounded-2xl border border-red-200 bg-red-50 p-4 shadow-sm" role="alert">
+            <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-red-500 text-white">
+              <Icone nome="alert" className="h-5 w-5" />
+            </span>
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 font-bold text-red-800">
+                <span className="bm-dot is-crit" />
+                Atenção: você possui {manutencoesUrgentes.length} manutenção(ões) urgente(s) atribuída(s)!
+              </div>
+              <ul className="mt-1 list-disc pl-5 text-sm text-red-800">
+                {manutencoesUrgentes.map((m) => (
+                  <li key={m.id}>{m.descricao}</li>
+                ))}
+              </ul>
             </div>
-            <ul className="list-disc pl-6 text-red-800 text-sm">
-              {manutencoesUrgentes.map(m => (
-                <li key={m.id}>{m.descricao}</li>
-              ))}
-            </ul>
           </div>
         )}
-        
+
+        {/* ===== Hero ===== */}
+        <section className="bm-hero mb-6 px-5 py-6 sm:mb-8 sm:px-8 sm:py-7">
+          <Parallax velocidade={-0.05} className="pointer-events-none absolute -right-20 -top-28 h-80 w-80 rounded-full bg-[#3a7bff]/25 blur-3xl" />
+          <Parallax velocidade={0.04} className="pointer-events-none absolute -bottom-24 left-1/3 h-56 w-56 rounded-full bg-[#ffcc00]/10 blur-3xl" />
+          <div className="relative grid items-center gap-6 md:grid-cols-[minmax(0,1fr)_240px] lg:grid-cols-[minmax(0,1fr)_300px]">
+            <div className="bm-hero-in min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="bm-chip">
+                  <Icone nome="calendar" className="h-3.5 w-3.5" />
+                  {hojeExtenso}
+                </span>
+                {ehAdmin && (
+                  <span className="bm-chip">
+                    <span className={`bm-dot ${nivelAlertas === "crit" ? "is-crit" : nivelAlertas === "warn" ? "is-warn" : ""}`} />
+                    {totalAlertas === 0 ? "Estoque das máquinas em dia" : `${totalAlertas} alerta${totalAlertas === 1 ? "" : "s"} de estoque`}
+                  </span>
+                )}
+              </div>
+              <div>
+                <h1 className="mt-4 text-4xl font-extrabold tracking-tight sm:text-5xl">
+                  Dashboard
+                  <span className="ml-2 inline-block h-2.5 w-2.5 rounded-full bg-[#ffcc00] align-middle shadow-[0_0_14px_#ffcc00]" />
+                </h1>
+                <p className="mt-2 max-w-xl text-sm text-slate-300 sm:text-base">
+                  {primeiroNome ? `Olá, ${primeiroNome}. ` : ""}Visão geral da operação de máquinas e pelúcias.
+                </p>
+              </div>
+              <div className="mt-6 flex flex-wrap gap-2">
+                <Link to="/movimentacoes?nova=true" className="bm-btn bm-btn-gold">
+                  <Icone nome="plus" className="h-4 w-4" strokeWidth={2.4} />
+                  Nova movimentação
+                </Link>
+                <button onClick={atualizarDashboard} disabled={atualizando} className="bm-btn bm-btn-glass" title="Atualizar dados">
+                  <Icone nome="refresh" className={`h-4 w-4 ${atualizando ? "bm-spin" : ""}`} />
+                  {atualizando ? "Atualizando..." : "Atualizar"}
+                </button>
+                <Link to="/veiculos" className="bm-btn bm-btn-glass" title="Ir para Veículos">
+                  <Icone nome="truck" className="h-4 w-4" />
+                  Veículos
+                  <Icone nome="arrow" className="bm-ic-nudge h-3.5 w-3.5 opacity-70" />
+                </Link>
+              </div>
+            </div>
+            <Parallax velocidade={0.06} className="hidden h-60 md:block lg:h-72">
+              <Suspense fallback={null}>
+                <ClawMachine3D className="h-full" />
+              </Suspense>
+            </Parallax>
+          </div>
+        </section>
+
         {/* Widget de Carrinho de Produtos */}
-        <div className="mb-8">
-          <CarrinhoWidget 
+        <div className="mb-6 empty:hidden sm:mb-8">
+          <CarrinhoWidget
             onDevolucaoClick={(carrinho) => {
               setCarrinhoSelecionado(carrinho);
               setMostrarModalDevolucao(true);
@@ -1667,211 +1774,109 @@ export function Dashboard() {
             }}
           />
         </div>
-        {/* Header com boas-vindas */}
-        <div className="mb-8 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-          <div>
-            <h1 className="text-4xl font-bold mb-2">
-              <span className="text-gradient">Dashboard</span> 🧸
-            </h1>
-            <p className="text-gray-600">
-              Visão geral do seu sistema de pelúcias
-            </p>
-          </div>
-          <div className="flex flex-col xs:flex-row gap-2 w-full sm:w-auto">
-            <button
-              onClick={carregarDados}
-              className="btn-primary flex items-center gap-2 w-full xs:w-auto justify-center"
-              title="Atualizar dados"
-            >
-              <svg
-                className="w-5 h-5"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
-                />
-              </svg>
-              Atualizar
-            </button>
-            <button
-              onClick={() => window.location.assign('/veiculos')}
-              className="btn-primary flex items-center gap-2 w-full xs:w-auto justify-center"
-              title="Ir para Veículos"
-            >
-              <svg
-                className="w-5 h-5"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M9 5l7 7-7 7"
-                />
-              </svg>
-              Veículos
-            </button>
-          </div>
-        </div>
 
-        {/* Cards de Resumo com design moderno - Apenas para ADMIN */}
-        {/* Card de acesso para Manutenções - visível para todos */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4 md:gap-6 mb-8">
-          {podeAcessarCarrinhos && (
-            <Link to="/carrinhos" className="stat-card bg-linear-to-br from-green-500 to-green-700 p-4 sm:p-6 rounded-xl shadow-md flex flex-col justify-between min-h-30 hover:scale-105 transition-transform cursor-pointer relative">
-              <div className="relative z-10 flex flex-col items-center justify-center h-full">
-                <span className="text-5xl mb-2">🛒</span>
-                <span className="font-bold text-lg text-center">Carrinhos</span>
-                <span className="text-xs text-green-100 mt-1 text-center">Gestão de produtos dos funcionários</span>
-              </div>
-            </Link>
-          )}
-          <Link to="/manutencoes" className="stat-card bg-linear-to-br from-blue-500 to-blue-700 p-4 sm:p-6 rounded-xl shadow-md flex flex-col justify-between min-h-30 hover:scale-105 transition-transform cursor-pointer relative">
-            <div className="relative z-10 flex flex-col items-center justify-center h-full">
-              <span className="text-5xl mb-2">🛠️</span>
-              <span className="font-bold text-lg text-center">Manutenções</span>
-              <span className="text-xs text-blue-100 mt-1 text-center">Visualizar e gerenciar manutenções</span>
-              {/* Badge de alerta para FUNCIONARIO com manutenções pendentes */}
-              {usuario?.role === "FUNCIONARIO" && (
-                <ManutencoesBadgeAlert userId={usuario.id} />
-              )}
+        {/* ===== Indicadores da semana (dados do balanço semanal) - Apenas para ADMIN ===== */}
+        {ehAdmin && totaisSemana && (
+          <Reveal as="section" className="mb-8" aria-label="Indicadores dos últimos 7 dias">
+            <h2 className="bm-section-title mb-3">
+              Últimos 7 dias{periodoSemana && <span className="font-medium normal-case tracking-normal text-slate-400">· {periodoSemana}</span>}
+            </h2>
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 sm:gap-4 lg:grid-cols-5">
+              <KpiDestaque
+                className="col-span-2 sm:col-span-3 lg:col-span-2"
+                titulo="Faturamento"
+                valor={Number(totaisSemana.totalFaturamento) || 0}
+                formatar={formatarMoeda}
+                descricao="Fichas + notas + cartão das coletas registradas"
+                acao={{ to: "/graficos", label: "Ver gráficos" }}
+                versao={versaoDados}
+              />
+              <KpiCard icone="gift" tom="verde" titulo="Prêmios saídos" valor={premiosSaidos} descricao="Pelúcias entregues" versao={versaoDados} />
+              <KpiCard icone="box" tom="ciano" titulo="Abastecidas" valor={Number(totaisSemana.totalAbastecidas) || 0} descricao="Unidades repostas" versao={versaoDados} />
+              <KpiCard
+                className="col-span-2 sm:col-span-1"
+                icone="clipboard"
+                tom="violeta"
+                titulo="Coletas"
+                valor={Number(stats.balanco?.totalMovimentacoes) || 0}
+                descricao="Movimentações registradas"
+                versao={versaoDados}
+              />
             </div>
-          </Link>
-          {usuario?.role === "ADMIN" && <>
-            {(() => {
-              const diasSemanaDisplay = ["Domingo", "Segunda-feira", "Terça-feira", "Quarta-feira", "Quinta-feira", "Sexta-feira", "Sábado"];
-              const diaVariantes = [
-                [],              // domingo
-                ["segunda"],
-                ["terça", "terca"],
-                ["quarta"],
-                ["quinta"],
-                ["sexta"],
-                [],              // sábado
-              ];
-              const diaNomeDisplay = diasSemanaDisplay[new Date().getDay()];
-              const variantes = diaVariantes[new Date().getDay()];
-              const qtd = roteirosHoje.filter((r) => {
-                const zona = (r.zona || "").toLowerCase();
-                return variantes.some((v) => zona.startsWith(v));
-              }).length;
-              return (
-                <Link to="/roteiros" className="stat-card bg-linear-to-br from-purple-500 to-indigo-600 p-4 sm:p-6 rounded-xl shadow-md flex flex-col justify-between min-h-30 hover:scale-105 transition-transform cursor-pointer">
-                  <div className="relative z-10">
-                    <div className="flex items-center justify-between mb-2">
-                      <h3 className="text-sm font-medium opacity-90">
-                        Roteiros para hoje
-                      </h3>
-                      <svg
-                        className="w-8 h-8 opacity-80"
-                        fill="none"
-                        stroke="currentColor"
-                        viewBox="0 0 24 24"
-                      >
-                        <path
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          strokeWidth={2}
-                          d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"
-                        />
-                      </svg>
-                    </div>
-                    <p className="text-3xl font-bold">{qtd}</p>
-                    <p className="text-xs opacity-75 mt-1">📋 {diaNomeDisplay}</p>
-                  </div>
-                </Link>
-              );
-            })()}
+          </Reveal>
+        )}
 
-            {/* Removido: Card de Moedas Inseridas */}
-
-            <div className="stat-card bg-linear-to-br from-green-500 to-green-600 p-4 sm:p-6 rounded-xl shadow-md flex flex-col justify-between min-h-30">
-              <div className="relative z-10">
-                <div className="flex items-center justify-between mb-2">
-                  <h3 className="text-sm font-medium opacity-90">
-                    Prêmios Saídos
-                  </h3>
-                  <svg
-                    className="w-8 h-8 opacity-80"
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
+        {/* ===== Operação: atalhos (Manutenções visível para todos) ===== */}
+        <section className="mb-8" aria-label="Operação">
+          <Reveal as="h2" className="bm-section-title mb-3">
+            Operação
+          </Reveal>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4 lg:grid-cols-4">
+            {podeAcessarCarrinhos && (
+              <Reveal atraso={0}>
+                <OpCard to="/carrinhos" icone="cart" tom="verde" titulo="Carrinhos" descricao="Gestão de produtos dos funcionários" acao="Abrir carrinhos" />
+              </Reveal>
+            )}
+            <Reveal atraso={60}>
+              <OpCard to="/manutencoes" icone="wrench" tom="azul" titulo="Manutenções" descricao="Visualizar e gerenciar manutenções" acao="Abrir manutenções">
+                {/* Badge de alerta para FUNCIONARIO com manutenções pendentes */}
+                {usuario?.role === "FUNCIONARIO" && <ManutencoesBadgeAlert userId={usuario.id} />}
+              </OpCard>
+            </Reveal>
+            {ehAdmin && (
+              <>
+                <Reveal atraso={120}>
+                  <OpCard to="/roteiros" icone="route" tom="violeta" titulo="Roteiros para hoje" descricao={diaNomeDisplay} valor={qtdRoteirosHoje} acao="Ver roteiros" />
+                </Reveal>
+                <Reveal atraso={180}>
+                  <OpCard
+                    icone={nivelAlertas === "ok" ? "check" : "alert"}
+                    tom={nivelAlertas === "crit" ? "vermelho" : nivelAlertas === "warn" ? "laranja" : "verde"}
+                    titulo="Alertas de Estoque"
+                    valor={totalAlertas}
+                    sutil={nivelAlertas === "ok"}
+                    destaque={nivelAlertas === "crit"}
+                    descricao={
+                      totalAlertas === 0
+                        ? "Nenhum alerta no momento"
+                        : `${stats.alertas.length} máquina${stats.alertas.length === 1 ? "" : "s"} · ${alertasEstoqueLoja.length} loja${alertasEstoqueLoja.length === 1 ? "" : "s"}`
+                    }
+                    acao={stats.alertas.length > 0 ? "Ver alertas" : "Abrir alertas de estoque"}
+                    onClick={() => {
+                      const alertSection = document.getElementById("alertas-estoque-maquinas");
+                      if (alertSection) {
+                        alertSection.scrollIntoView({ behavior: "smooth" });
+                      } else {
+                        navigate("/alertas-estoque");
+                      }
+                    }}
                   >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth={2}
-                      d="M12 8v13m0-13V6a2 2 0 112 2h-2zm0 0V5.5A2.5 2.5 0 109.5 8H12zm-7 4h14M5 12a2 2 0 110-4h14a2 2 0 110 4M5 12v7a2 2 0 002 2h10a2 2 0 002-2v-7"
-                    />
-                  </svg>
-                </div>
-                <p className="text-3xl font-bold">
-                  {stats.balanco?.totais?.totalProdutosSairam ?? stats.balanco?.totais?.totalSairam ?? 0}
-                </p>
-                <p className="text-xs opacity-75 mt-1">🎁 Pelúcias entregues</p>
-              </div>
-            </div>
-
-            <div
-              className="stat-card bg-linear-to-br from-red-500 to-red-600 p-4 sm:p-6 rounded-xl shadow-md flex flex-col justify-between min-h-30 cursor-pointer"
-              onClick={() => {
-                const alertSection = document.getElementById(
-                  "alertas-estoque-maquinas"
-                );
-                if (alertSection) {
-                  alertSection.scrollIntoView({ behavior: "smooth" });
-                }
-              }}
-            >
-              <div className="relative z-10">
-                <div className="flex items-center justify-between mb-2">
-                  <h3 className="text-sm font-medium opacity-90">
-                    Alertas de Estoque
-                  </h3>
-                  <svg
-                    className="w-8 h-8 opacity-80"
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
-                  >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth={2}
-                      d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
-                    />
-                  </svg>
-                </div>
-                <p className="text-3xl font-bold">
-                  {stats.alertas.length + alertasEstoqueLoja.length}
-                </p>
-                <p className="text-xs opacity-75 mt-1">
-                  ⚠️ {stats.alertas.length} máquinas · 🏪{" "}
-                  {alertasEstoqueLoja.length} lojas
-                </p>
-              </div>
-            </div>
-          </>}
-        </div>
-        <div className="card-gradient mb-8">
-          <h2 className="text-2xl font-bold text-gray-900 mb-6 flex items-center gap-2">
-            <span className="text-3xl">🔍</span>
-            Buscar Lojas e Máquinas
-          </h2>
+                    {nivelAlertas === "crit" && (
+                      <span className="absolute right-4 top-4 inline-flex items-center gap-1.5 rounded-full bg-red-50 px-2 py-0.5 text-[11px] font-bold text-red-700 ring-1 ring-red-200">
+                        <span className="bm-dot is-crit" />
+                        Crítico
+                      </span>
+                    )}
+                  </OpCard>
+                </Reveal>
+              </>
+            )}
+          </div>
+        </section>
+        <Reveal className="bm-card mb-8 p-5 sm:p-6">
+          <SecaoCabecalho icone="search" titulo="Buscar Lojas e Máquinas" descricao="Consulte estoque, movimentações e detalhes de cada ponto" />
 
           {!mostrarBuscaLojasMaquinas && !lojaSelecionada && !maquinaSelecionada && (
             <button
               onClick={abrirBuscaLojasMaquinas}
-              className="btn-primary w-full sm:w-auto"
+              className="bm-btn bm-btn-blue w-full sm:w-auto"
               disabled={loadingBuscaLojasMaquinas}
             >
+              {loadingBuscaLojasMaquinas ? (
+                <Icone nome="refresh" className="h-4 w-4 bm-spin" />
+              ) : (
+                <Icone nome="store" className="h-4 w-4" />
+              )}
               {loadingBuscaLojasMaquinas
                 ? "Carregando lojas e máquinas..."
                 : "Abrir e ver lojas e máquinas"}
@@ -2512,24 +2517,26 @@ export function Dashboard() {
               )}
             </div>
           )}
-        </div>
+        </Reveal>
 
         {/* Alertas de Estoque - Apenas para ADMIN */}
         {usuario?.role === "ADMIN" && stats.alertas.length > 0 && (
-          <div className="card mb-8 border-l-4 border-red-500" id="alertas-estoque-maquinas">
-            <div className="flex items-center justify-between mb-6">
-              <h2 className="text-2xl font-bold text-gray-900 flex items-center gap-2">
-                <span className="bg-red-100 p-2 rounded-lg">⚠️</span>
-                Alertas de Estoque em Máquinas
-              </h2>
-              <span className="badge badge-danger">
+          <Reveal className="bm-card mb-8 scroll-mt-6 overflow-hidden p-5 sm:p-6" id="alertas-estoque-maquinas">
+            <span className={`absolute inset-x-0 top-0 h-1 ${temAlertaCritico ? "bg-[#ed3136]" : "bg-orange-500"}`} />
+            <SecaoCabecalho
+              icone="alert"
+              tom={temAlertaCritico ? "vermelho" : "laranja"}
+              titulo="Alertas de Estoque em Máquinas"
+              descricao="Máquinas abaixo do nível de estoque esperado"
+            >
+              <span className="inline-flex items-center gap-1.5 rounded-full bg-red-50 px-3 py-1 text-sm font-semibold text-red-700 ring-1 ring-red-200">
                 {stats.alertas.length}{" "}
                 {stats.alertas.length === 1 ? "alerta" : "alertas"}
               </span>
-            </div>
+            </SecaoCabecalho>
             {!mostrarAlertasMaquinas ? (
               <button
-                className="block mt-6 w-full text-center bg-linear-to-r from-primary/10 to-accent-yellow/10 hover:from-primary/20 hover:to-accent-yellow/20 text-primary font-bold py-3 rounded-xl transition-all duration-200"
+                className="bm-btn bm-btn-soft w-full py-3"
                 onClick={() => {
                   setMostrarAlertasMaquinas(true);
                   setLimiteAlertasMaquinas(20);
@@ -2538,21 +2545,32 @@ export function Dashboard() {
                 Abrir e ver alertas de estoque em máquinas
               </button>
             ) : (
-              <div className="mt-6 space-y-3">
+              <div className="space-y-2.5">
                 {alertasMaquinasVisiveis.map((alerta, index) => (
                   <div
                     key={index}
-                    className={`p-5 rounded-xl border-l-4 transition-all duration-200 hover:scale-[1.02] ${
+                    className={`rounded-xl border border-l-4 p-4 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md ${
                       alerta.nivelAlerta === "CRÍTICO"
-                        ? "bg-linear-to-r from-red-50 to-red-100/50 border-red-500 shadow-red-100 shadow-md"
+                        ? "bg-red-50/70 border-red-200 border-l-red-500"
                         : alerta.nivelAlerta === "ALTO"
-                        ? "bg-linear-to-r from-orange-50 to-orange-100/50 border-orange-500 shadow-orange-100 shadow-md"
-                        : "bg-linear-to-r from-yellow-50 to-yellow-100/50 border-yellow-500 shadow-yellow-100 shadow-md"
+                        ? "bg-orange-50/70 border-orange-200 border-l-orange-500"
+                        : "bg-amber-50/60 border-amber-200 border-l-amber-400"
                     }`}
                   >
-                    <div className="flex justify-between items-start">
-                      <div className="flex-1">
-                        <div className="flex items-center gap-2 mb-1">
+                    <div className="flex justify-between items-start gap-3">
+                      <div className="flex-1 min-w-0">
+                        <span
+                          className={`mb-1 inline-block rounded-full px-2 py-0.5 text-[10px] font-bold tracking-wider ${
+                            alerta.nivelAlerta === "CRÍTICO"
+                              ? "bg-red-100 text-red-700"
+                              : alerta.nivelAlerta === "ALTO"
+                              ? "bg-orange-100 text-orange-700"
+                              : "bg-amber-100 text-amber-800"
+                          }`}
+                        >
+                          {alerta.nivelAlerta}
+                        </span>
+                        <div className="flex flex-wrap items-center gap-x-2 mb-1">
                           <span className="font-bold text-lg text-gray-900">
                             {alerta.maquina.codigo}
                           </span>
@@ -2593,7 +2611,7 @@ export function Dashboard() {
                 ))}
                 {stats.alertas.length > limiteAlertasMaquinas && (
                   <button
-                    className="w-full text-center bg-linear-to-r from-primary/10 to-accent-yellow/10 hover:from-primary/20 hover:to-accent-yellow/20 text-primary font-bold py-3 rounded-xl transition-all duration-200"
+                    className="bm-btn bm-btn-soft w-full py-3"
                     onClick={() =>
                       setLimiteAlertasMaquinas((prev) =>
                         Math.min(prev + 20, stats.alertas.length)
@@ -2604,30 +2622,27 @@ export function Dashboard() {
                   </button>
                 )}
                 <button
-                  className="mt-4 w-full text-center bg-gray-200 hover:bg-gray-300 text-gray-700 font-bold py-2 rounded-xl transition-all duration-200"
+                  className="bm-btn mt-2 w-full bg-slate-100 py-2.5 text-slate-700 hover:bg-slate-200"
                   onClick={() => setMostrarAlertasMaquinas(false)}
                 >
                   Fechar alertas
                 </button>
               </div>
             )}
-          </div>
+          </Reveal>
         )}
 
         {/* Alertas de Estoque de Lojas - Apenas para ADMIN */}
         {usuario?.role === "ADMIN" && alertasEstoqueLoja.length > 0 && (
-          <div className="card mb-8 border-l-4 border-orange-500">
-            <div className="flex items-center justify-between mb-6">
-              <h2 className="text-2xl font-bold text-gray-900 flex items-center gap-2">
-                <span className="bg-orange-100 p-2 rounded-lg">🏪</span>
-                Alertas de Estoque nas Lojas
-              </h2>
-              <span className="badge bg-orange-100 text-orange-700 border-orange-300">
+          <Reveal className="bm-card mb-8 overflow-hidden p-5 sm:p-6">
+            <span className="absolute inset-x-0 top-0 h-1 bg-orange-500" />
+            <SecaoCabecalho icone="store" tom="laranja" titulo="Alertas de Estoque nas Lojas" descricao="Produtos abaixo do estoque mínimo nas lojas">
+              <span className="inline-flex items-center rounded-full bg-orange-50 px-3 py-1 text-sm font-semibold text-orange-700 ring-1 ring-orange-200">
                 {alertasEstoqueLoja.length}{" "}
                 {alertasEstoqueLoja.length === 1 ? "produto" : "produtos"}
               </span>
-            </div>
-            <div className="space-y-3">
+            </SecaoCabecalho>
+            <div className="space-y-2.5">
               {alertasEstoqueLoja.slice(0, 5).map((alerta, index) => {
                 const percentualAtual =
                   alerta.estoqueMinimo > 0
@@ -2645,16 +2660,27 @@ export function Dashboard() {
                 return (
                   <div
                     key={`${alerta.lojaId}-${alerta.produtoId}-${index}`}
-                    className={`p-5 rounded-xl border-l-4 transition-all duration-200 hover:scale-[1.02] ${
+                    className={`rounded-xl border border-l-4 p-4 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md ${
                       nivelAlerta === "CRÍTICO"
-                        ? "bg-linear-to-r from-red-50 to-red-100/50 border-red-500 shadow-red-100 shadow-md"
+                        ? "bg-red-50/70 border-red-200 border-l-red-500"
                         : nivelAlerta === "ALTO"
-                        ? "bg-linear-to-r from-orange-50 to-orange-100/50 border-orange-500 shadow-orange-100 shadow-md"
-                        : "bg-linear-to-r from-yellow-50 to-yellow-100/50 border-yellow-500 shadow-yellow-100 shadow-md"
+                        ? "bg-orange-50/70 border-orange-200 border-l-orange-500"
+                        : "bg-amber-50/60 border-amber-200 border-l-amber-400"
                     }`}
                   >
-                    <div className="flex justify-between items-start">
-                      <div className="flex-1">
+                    <div className="flex justify-between items-start gap-3">
+                      <div className="flex-1 min-w-0">
+                        <span
+                          className={`mb-1 inline-block rounded-full px-2 py-0.5 text-[10px] font-bold tracking-wider ${
+                            nivelAlerta === "CRÍTICO"
+                              ? "bg-red-100 text-red-700"
+                              : nivelAlerta === "ALTO"
+                              ? "bg-orange-100 text-orange-700"
+                              : "bg-amber-100 text-amber-800"
+                          }`}
+                        >
+                          {nivelAlerta}
+                        </span>
                         <div className="flex items-center gap-2 mb-2">
                           <span className="text-2xl">
                             {alerta.produto.emoji || "📦"}
@@ -2702,44 +2728,47 @@ export function Dashboard() {
             {alertasEstoqueLoja.length > 5 && (
               <Link
                 to="/lojas"
-                className="block mt-6 text-center bg-linear-to-r from-orange-500/10 to-orange-600/10 hover:from-orange-500/20 hover:to-orange-600/20 text-orange-700 font-bold py-3 rounded-xl transition-all duration-200"
+                className="bm-btn mt-5 w-full bg-orange-50 py-3 text-orange-700 ring-1 ring-orange-200 hover:bg-orange-100"
               >
                 Ver todos os alertas de lojas ({alertasEstoqueLoja.length})
               </Link>
             )}
-          </div>
+          </Reveal>
         )}
 
         {/* Distribuição por Loja */}
         {stats.balanco?.distribuicaoLojas?.length > 0 && (
-          <div className="card">
-            <div className="flex items-center justify-between mb-6">
-              <h2 className="text-2xl font-bold text-gray-900 flex items-center gap-2">
-                <span className="bg-linear-to-br from-primary to-accent-yellow p-2 rounded-lg">
-                  <svg
-                    className="w-6 h-6 text-white"
-                    fill="currentColor"
-                    viewBox="0 0 20 20"
-                  >
-                    <path
-                      fillRule="evenodd"
-                      d="M5.05 4.05a7 7 0 119.9 9.9L10 18.9l-4.95-4.95a7 7 0 010-9.9zM10 11a2 2 0 100-4 2 2 0 000 4z"
-                      clipRule="evenodd"
-                    />
-                  </svg>
-                </span>
-                Performance por Loja
-              </h2>
-              <span className="badge badge-info">
+          <Reveal className="bm-card p-5 sm:p-6">
+            <SecaoCabecalho icone="chart" titulo="Performance por Loja" descricao={`Faturamento dos últimos 7 dias${periodoSemana ? ` · ${periodoSemana}` : ""}`}>
+              <span className="inline-flex items-center rounded-full bg-[#eef3ff] px-3 py-1 text-sm font-semibold text-[#2457b1] ring-1 ring-[#d9e4ff]">
                 {stats.balanco.distribuicaoLojas.length}{" "}
                 {stats.balanco.distribuicaoLojas.length === 1
                   ? "loja"
                   : "lojas"}
               </span>
-            </div>
+            </SecaoCabecalho>
+            {rankingLojas.length > 0 && (
+              <ol className="mb-5 space-y-2.5" aria-label="Lojas com maior faturamento">
+                {rankingLojas.map((loja, i) => (
+                  <li key={`${loja.nome}-${i}`} className="grid grid-cols-[minmax(0,7.5rem)_minmax(0,1fr)_6.5rem] items-center gap-3 text-sm sm:grid-cols-[minmax(0,14rem)_minmax(0,1fr)_7.5rem]">
+                    <span className="truncate font-medium text-slate-700" title={loja.nome}>
+                      <span className="mr-2 text-xs font-semibold text-slate-400 tabular-nums">{i + 1}</span>
+                      {loja.nome}
+                    </span>
+                    <span className="h-3 overflow-hidden rounded-r bg-slate-100">
+                      <span
+                        className="bm-bar block"
+                        style={{ "--w": maiorFaturamentoLoja > 0 ? Math.max(0.02, loja.faturamento / maiorFaturamentoLoja) : 0, "--bm-delay": `${i * 70}ms` }}
+                      />
+                    </span>
+                    <span className="text-right font-semibold text-slate-900 tabular-nums">{formatarMoeda(Number(loja.faturamento) || 0)}</span>
+                  </li>
+                ))}
+              </ol>
+            )}
             {!mostrarPerformanceLojas ? (
               <button
-                className="block mt-6 w-full text-center bg-linear-to-r from-primary/10 to-accent-yellow/10 hover:from-primary/20 hover:to-accent-yellow/20 text-primary font-bold py-3 rounded-xl transition-all duration-200"
+                className="bm-btn bm-btn-soft w-full py-3"
                 onClick={() => {
                   setMostrarPerformanceLojas(true);
                   setLimitePerformanceLojas(20);
@@ -2858,7 +2887,7 @@ export function Dashboard() {
                 </div>
                 {stats.balanco.distribuicaoLojas.length > limitePerformanceLojas && (
                   <button
-                    className="mt-4 w-full text-center bg-linear-to-r from-primary/10 to-accent-yellow/10 hover:from-primary/20 hover:to-accent-yellow/20 text-primary font-bold py-3 rounded-xl transition-all duration-200"
+                    className="bm-btn bm-btn-soft mt-4 w-full py-3"
                     onClick={() =>
                       setLimitePerformanceLojas((prev) =>
                         Math.min(prev + 20, stats.balanco.distribuicaoLojas.length)
@@ -2869,38 +2898,26 @@ export function Dashboard() {
                   </button>
                 )}
                 <button
-                  className="mt-3 w-full text-center bg-gray-200 hover:bg-gray-300 text-gray-700 font-bold py-2 rounded-xl transition-all duration-200"
+                  className="bm-btn mt-3 w-full bg-slate-100 py-2.5 text-slate-700 hover:bg-slate-200"
                   onClick={() => setMostrarPerformanceLojas(false)}
                 >
                   Fechar performance
                 </button>
               </>
             )}
-          </div>
+          </Reveal>
         )}
 
         {/* Ação Rápida com design destacado */}
-        <div className="mt-8 flex justify-center">
+        <Reveal className="mt-8 flex justify-center">
           <Link
             to="/movimentacoes?nova=true"
-            className="btn-primary text-lg px-10 py-4 flex items-center gap-3 shadow-2xl"
+            className="bm-btn bm-btn-blue px-8 py-4 text-base"
           >
-            <svg
-              className="w-6 h-6"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M12 6v6m0 0v6m0-6h6m-6 0H6"
-              />
-            </svg>
+            <Icone nome="plus" className="h-5 w-5" strokeWidth={2.4} />
             Registrar Nova Movimentação
           </Link>
-        </div>
+        </Reveal>
       </div>
 
       {/* Modal de Edição de Estoque */}

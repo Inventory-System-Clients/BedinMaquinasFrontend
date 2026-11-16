@@ -1,6 +1,27 @@
 import { Link, useNavigate, useLocation } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
 import { useState } from "react";
+import { Icone } from "./dashboard/fx";
+import "./dashboard/dashboard.css";
+
+// Links do menu, com a mesma regra de permissão de antes.
+const LINKS = [
+  { to: "/", label: "Dashboard", icone: "dashboard" },
+  { to: "/movimentacoes", label: "Movimentações", icone: "box" },
+  { to: "/maquinas", label: "Máquinas", icone: "gamepad" },
+  { to: "/lojas", label: "Lojas", icone: "store" },
+  { to: "/produtos", label: "Produtos", icone: "tag" },
+  { to: "/financeiro", label: "Financeiro", icone: "wallet", roles: ["ADMIN", "FINANCEIRO"] },
+  { to: "/graficos", label: "Gráficos", icone: "chart", roles: ["ADMIN"] },
+  { to: "/alertas-estoque", label: "Alertas", labelMobile: "Alertas de Estoque", icone: "bell", roles: ["ADMIN"] },
+  { to: "/relatorios", label: "Relatórios", icone: "file", roles: ["ADMIN"] },
+  { to: "/usuarios", label: "Usuários", icone: "users", roles: ["ADMIN"] },
+];
+
+function iniciais(nome = "") {
+  const partes = nome.trim().split(/\s+/).filter(Boolean);
+  return ((partes[0]?.[0] || "") + (partes.length > 1 ? partes[partes.length - 1][0] : "")).toUpperCase() || "?";
+}
 
 export function Navbar() {
   const { usuario, logout } = useAuth();
@@ -14,218 +35,73 @@ export function Navbar() {
   };
 
   const isActive = (path) => location.pathname === path;
-
   const toggleMenu = () => setIsMenuOpen(!isMenuOpen);
-
   const closeMenu = () => setIsMenuOpen(false);
 
+  const links = LINKS.filter((l) => !l.roles || l.roles.includes(usuario?.role));
+  const ehAdmin = usuario?.role === "ADMIN";
+
   return (
-    <nav className="shadow-2xl border-b-4 border-yellow-400" style={{ background: 'linear-gradient(to right, #C91F24, #2457B1)', textShadow: '0 2px 4px rgba(0,0,0,0.5)', color: '#FFFFFF' }}>
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="flex items-center justify-between h-20">
-          <div className="flex items-center">
-            <Link
-              to="/"
-              className="flex items-center space-x-2 sm:space-x-3 group"
-            >
+    <nav className="bm-nav relative z-40 text-white">
+      <div className="mx-auto max-w-screen-2xl px-4 sm:px-6 lg:px-8">
+        <div className="flex h-16 items-center justify-between gap-3 sm:h-18">
+          <div className="flex min-w-0 items-center gap-4">
+            <Link to="/" className="group flex shrink-0 items-center" title="Ir para o Dashboard">
+              {/* O PNG é quadrado com margem transparente: o tamanho maior compensa a margem. */}
               <img
                 src="/logo.png"
                 alt="Bedin Máquinas"
-                className="w-20 h-25 sm:w-20 sm:h-20 lg:w-28 lg:h-28 object-contain transition-transform duration-300 group-hover:scale-110"
+                className="-my-3 h-20 w-20 object-contain drop-shadow-[0_6px_14px_rgba(0,0,0,0.45)] transition-transform duration-300 group-hover:scale-105 sm:h-22 sm:w-22"
                 onError={(e) => {
                   e.target.style.display = "none";
                 }}
               />
-            
             </Link>
 
             {/* Menu Desktop */}
-            <div className="hidden lg:block ml-8">
-              <div className="flex items-center space-x-1.5">
-                <Link
-                  to="/"
-                  className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all duration-200 ${
-                    isActive("/")
-                      ? "bg-gradient-to-r from-primary to-accent-yellow text-white shadow-lg scale-105"
-                      : "text-gray-300 hover:bg-white/10 hover:text-white"
-                  }`}
-                >
-                  📊 Dashboard
+            <div className="hidden min-w-0 items-center gap-0.5 xl:flex">
+              {links.map((l) => (
+                <Link key={l.to} to={l.to} className={`bm-nav-link ${isActive(l.to) ? "is-active" : ""}`} aria-current={isActive(l.to) ? "page" : undefined}>
+                  <Icone nome={l.icone} className="h-4 w-4" />
+                  {l.label}
                 </Link>
-                <Link
-                  to="/movimentacoes"
-                  className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all duration-200 ${
-                    isActive("/movimentacoes")
-                      ? "bg-gradient-to-r from-primary to-accent-yellow text-white shadow-lg scale-105"
-                      : "text-gray-300 hover:bg-white/10 hover:text-white"
-                  }`}
-                >
-                  📦 Movimentações
-                </Link>
-                <Link
-                  to="/maquinas"
-                  className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all duration-200 ${
-                    isActive("/maquinas")
-                      ? "bg-gradient-to-r from-primary to-accent-yellow text-white shadow-lg scale-105"
-                      : "text-gray-300 hover:bg-white/10 hover:text-white"
-                  }`}
-                >
-                  🎮 Máquinas
-                </Link>
-                <Link
-                  to="/lojas"
-                  className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all duration-200 ${
-                    isActive("/lojas")
-                      ? "bg-gradient-to-r from-primary to-accent-yellow text-white shadow-lg scale-105"
-                      : "text-gray-300 hover:bg-white/10 hover:text-white"
-                  }`}
-                >
-                  🏪 Lojas
-                </Link>
-                <Link
-                  to="/produtos"
-                  className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all duration-200 ${
-                    isActive("/produtos")
-                      ? "bg-gradient-to-r from-primary to-accent-yellow text-white shadow-lg scale-105"
-                      : "text-gray-300 hover:bg-white/10 hover:text-white"
-                  }`}
-                >
-                  🧸 Produtos
-                </Link>
-                {(usuario?.role === "ADMIN" || usuario?.role === "FINANCEIRO") && (
-                  <Link
-                    to="/financeiro"
-                    className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all duration-200 ${
-                      isActive("/financeiro")
-                        ? "bg-gradient-to-r from-primary to-accent-yellow text-white shadow-lg scale-105"
-                        : "text-gray-300 hover:bg-white/10 hover:text-white"
-                    }`}
-                  >
-                    💰 Financeiro
-                  </Link>
-                )}
-                {usuario?.role === "ADMIN" && (
-                  <>
-                    <Link
-                      to="/graficos"
-                      className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all duration-200 ${
-                        isActive("/graficos")
-                          ? "bg-gradient-to-r from-primary to-accent-yellow text-white shadow-lg scale-105"
-                          : "text-gray-300 hover:bg-white/10 hover:text-white"
-                      }`}
-                    >
-                      📈 Gráficos
-                    </Link>
-                    <Link
-                      to="/alertas-estoque"
-                      className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all duration-200 ${
-                        isActive("/alertas-estoque")
-                          ? "bg-gradient-to-r from-primary to-accent-yellow text-white shadow-lg scale-105"
-                          : "text-gray-300 hover:bg-white/10 hover:text-white"
-                      }`}
-                    >
-                      🚨 Alertas
-                    </Link>
-                    <Link
-                      to="/relatorios"
-                      className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all duration-200 ${
-                        isActive("/relatorios")
-                          ? "bg-gradient-to-r from-primary to-accent-yellow text-white shadow-lg scale-105"
-                          : "text-gray-300 hover:bg-white/10 hover:text-white"
-                      }`}
-                    >
-                      📄 Relatórios
-                    </Link>
-                    <Link
-                      to="/usuarios"
-                      className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all duration-200 ${
-                        isActive("/usuarios")
-                          ? "bg-gradient-to-r from-primary to-accent-yellow text-white shadow-lg scale-105"
-                          : "text-gray-300 hover:bg-white/10 hover:text-white"
-                      }`}
-                    >
-                      👥 Usuários
-                    </Link>
-                  </>
-                )}
-              </div>
+              ))}
             </div>
           </div>
-          {/* User Info e Logout */}
-          <div className="flex items-center space-x-4">
-            {/* Botão Hamburger Mobile */}
-            <button
-              onClick={toggleMenu}
-              className="lg:hidden p-2 rounded-lg hover:bg-white/10 transition-colors"
-              aria-label="Menu"
-            >
-              <svg
-                className="w-6 h-6"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                {isMenuOpen ? (
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M6 18L18 6M6 6l12 12"
-                  />
-                ) : (
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M4 6h16M4 12h16M4 18h16"
-                  />
-                )}
-              </svg>
-            </button>
 
-            <div className="hidden md:block text-right bg-white/5 px-4 py-2 rounded-lg border border-white/10">
-              <div className="text-sm font-semibold text-white">
-                {usuario?.nome}
-              </div>
-              <div className="text-xs text-accent-cream flex items-center justify-end gap-1">
-                {usuario?.role === "ADMIN" ? (
-                  <>
-                    <svg
-                      className="w-3 h-3"
-                      fill="currentColor"
-                      viewBox="0 0 20 20"
-                    >
-                      <path
-                        fillRule="evenodd"
-                        d="M5 2a1 1 0 011 1v1h1a1 1 0 010 2H6v1a1 1 0 01-2 0V6H3a1 1 0 010-2h1V3a1 1 0 011-1zm0 10a1 1 0 011 1v1h1a1 1 0 110 2H6v1a1 1 0 11-2 0v-1H3a1 1 0 110-2h1v-1a1 1 0 011-1zM12 2a1 1 0 01.967.744L14.146 7.2 17.5 9.134a1 1 0 010 1.732l-3.354 1.935-1.18 4.455a1 1 0 01-1.933 0L9.854 12.8 6.5 10.866a1 1 0 010-1.732l3.354-1.935 1.18-4.455A1 1 0 0112 2z"
-                        clipRule="evenodd"
-                      />
-                    </svg>
-                    Administrador
-                  </>
-                ) : (
-                  "Funcionário"
-                )}
+          {/* User Info e Logout */}
+          <div className="flex shrink-0 items-center gap-2 sm:gap-3">
+            {/* Entre xl e 2xl o menu ocupa a largura: o nome vira só o avatar (com dica). */}
+            <div
+              className="hidden items-center gap-2.5 rounded-xl border border-white/10 bg-white/5 py-1.5 pl-1.5 pr-3 md:flex xl:pr-1.5 2xl:pr-3"
+              title={`${usuario?.nome || ""} · ${ehAdmin ? "Administrador" : "Funcionário"}`}
+            >
+              <span className="grid h-8 w-8 place-items-center rounded-lg bg-linear-to-br from-[#3a7bff] to-[#2457b1] text-xs font-bold ring-1 ring-white/20">
+                {iniciais(usuario?.nome)}
+              </span>
+              <div className="leading-tight xl:hidden 2xl:block">
+                <div className="max-w-40 truncate text-sm font-semibold text-white">{usuario?.nome}</div>
+                <div className={`flex items-center gap-1 text-[11px] font-medium ${ehAdmin ? "text-[#ffd84a]" : "text-slate-300"}`}>
+                  {ehAdmin && <Icone nome="shield" className="h-3 w-3" strokeWidth={2.2} />}
+                  {ehAdmin ? "Administrador" : "Funcionário"}
+                </div>
               </div>
             </div>
             <button
               onClick={handleLogout}
-              className="bg-gradient-to-r from-red-500 to-red-600 hover:from-red-600 hover:to-red-700 px-5 py-2.5 rounded-lg text-sm font-semibold transition-all duration-200 shadow-lg hover:shadow-xl transform hover:-translate-y-0.5 flex items-center gap-2"
+              className="bm-btn border border-red-400/40 bg-red-500/10 px-3 py-2 text-red-100 hover:border-red-400 hover:bg-[#ed3136] hover:text-white"
             >
-              <svg
-                className="w-4 h-4"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"
-                />
-              </svg>
+              <Icone nome="logout" className="h-4 w-4" />
               Sair
+            </button>
+            {/* Botão Hamburger Mobile */}
+            <button
+              onClick={toggleMenu}
+              className="grid h-10 w-10 place-items-center rounded-xl border border-white/10 bg-white/5 transition-colors hover:bg-white/10 xl:hidden"
+              aria-label={isMenuOpen ? "Fechar menu" : "Abrir menu"}
+              aria-expanded={isMenuOpen}
+            >
+              <Icone nome={isMenuOpen ? "x" : "menu"} className="h-5 w-5" />
             </button>
           </div>
         </div>
@@ -233,150 +109,33 @@ export function Navbar() {
 
       {/* Menu Mobile Dropdown */}
       {isMenuOpen && (
-        <div className="lg:hidden bg-gray-900 border-t border-white/10">
-          <div className="px-4 py-3 space-y-2">
-            <Link
-              to="/"
-              onClick={closeMenu}
-              className={`block px-4 py-3 rounded-lg text-sm font-medium transition-all ${
-                isActive("/")
-                  ? "bg-gradient-to-r from-primary to-accent-yellow text-white shadow-lg"
-                  : "text-gray-300 hover:bg-white/10 hover:text-white"
-              }`}
-            >
-              📊 Dashboard
-            </Link>
-            <Link
-              to="/movimentacoes"
-              onClick={closeMenu}
-              className={`block px-4 py-3 rounded-lg text-sm font-medium transition-all ${
-                isActive("/movimentacoes")
-                  ? "bg-gradient-to-r from-primary to-accent-yellow text-white shadow-lg"
-                  : "text-gray-300 hover:bg-white/10 hover:text-white"
-              }`}
-            >
-              📦 Movimentações
-            </Link>
-            <Link
-              to="/maquinas"
-              onClick={closeMenu}
-              className={`block px-4 py-3 rounded-lg text-sm font-medium transition-all ${
-                isActive("/maquinas")
-                  ? "bg-gradient-to-r from-primary to-accent-yellow text-white shadow-lg"
-                  : "text-gray-300 hover:bg-white/10 hover:text-white"
-              }`}
-            >
-              🎮 Máquinas
-            </Link>
-            <Link
-              to="/lojas"
-              onClick={closeMenu}
-              className={`block px-4 py-3 rounded-lg text-sm font-medium transition-all ${
-                isActive("/lojas")
-                  ? "bg-gradient-to-r from-primary to-accent-yellow text-white shadow-lg"
-                  : "text-gray-300 hover:bg-white/10 hover:text-white"
-              }`}
-            >
-              🏪 Lojas
-            </Link>
-            <Link
-              to="/produtos"
-              onClick={closeMenu}
-              className={`block px-4 py-3 rounded-lg text-sm font-medium transition-all ${
-                isActive("/produtos")
-                  ? "bg-gradient-to-r from-primary to-accent-yellow text-white shadow-lg"
-                  : "text-gray-300 hover:bg-white/10 hover:text-white"
-              }`}
-            >
-              🧸 Produtos
-            </Link>
-            {(usuario?.role === "ADMIN" || usuario?.role === "FINANCEIRO") && (
-              <Link
-                to="/financeiro"
-                onClick={closeMenu}
-                className={`block px-4 py-3 rounded-lg text-sm font-medium transition-all ${
-                  isActive("/financeiro")
-                    ? "bg-gradient-to-r from-primary to-accent-yellow text-white shadow-lg"
-                    : "text-gray-300 hover:bg-white/10 hover:text-white"
-                }`}
-              >
-                💰 Financeiro
-              </Link>
-            )}
-            {usuario?.role === "ADMIN" && (
-              <>
+        <div className="bm-menu-panel border-t border-white/10 bg-[#081329]/95 backdrop-blur xl:hidden">
+          <div className="max-w-7xl mx-auto px-4 py-3 sm:px-6 lg:px-8">
+            <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2 lg:grid-cols-3">
+              {links.map((l) => (
                 <Link
-                  to="/graficos"
+                  key={l.to}
+                  to={l.to}
                   onClick={closeMenu}
-                  className={`block px-4 py-3 rounded-lg text-sm font-medium transition-all ${
-                    isActive("/graficos")
-                      ? "bg-gradient-to-r from-primary to-accent-yellow text-white shadow-lg"
-                      : "text-gray-300 hover:bg-white/10 hover:text-white"
+                  aria-current={isActive(l.to) ? "page" : undefined}
+                  className={`flex items-center gap-3 rounded-xl px-4 py-3 text-sm font-medium transition-colors ${
+                    isActive(l.to) ? "bg-[#3a7bff]/25 text-white ring-1 ring-[#7aa7ff]/40" : "text-slate-300 hover:bg-white/10 hover:text-white"
                   }`}
                 >
-                  📈 Gráficos
+                  <Icone nome={l.icone} className={`h-5 w-5 ${isActive(l.to) ? "text-[#3ee6ff]" : ""}`} />
+                  {l.labelMobile || l.label}
                 </Link>
-                <Link
-                  to="/alertas-estoque"
-                  onClick={closeMenu}
-                  className={`block px-4 py-3 rounded-lg text-sm font-medium transition-all ${
-                    isActive("/alertas-estoque")
-                      ? "bg-gradient-to-r from-primary to-accent-yellow text-white shadow-lg"
-                      : "text-gray-300 hover:bg-white/10 hover:text-white"
-                  }`}
-                >
-                  🚨 Alertas de Estoque
-                </Link>
-                <Link
-                  to="/relatorios"
-                  onClick={closeMenu}
-                  className={`block px-4 py-3 rounded-lg text-sm font-medium transition-all ${
-                    isActive("/relatorios")
-                      ? "bg-gradient-to-r from-primary to-accent-yellow text-white shadow-lg"
-                      : "text-gray-300 hover:bg-white/10 hover:text-white"
-                  }`}
-                >
-                  📄 Relatórios
-                </Link>
-                <Link
-                  to="/usuarios"
-                  onClick={closeMenu}
-                  className={`block px-4 py-3 rounded-lg text-sm font-medium transition-all ${
-                    isActive("/usuarios")
-                      ? "bg-gradient-to-r from-primary to-accent-yellow text-white shadow-lg"
-                      : "text-gray-300 hover:bg-white/10 hover:text-white"
-                  }`}
-                >
-                  👥 Usuários
-                </Link>
-              </>
-            )}
+              ))}
+            </div>
 
             {/* User Info Mobile */}
-            <div className="md:hidden mt-4 pt-4 border-t border-white/10">
-              <div className="bg-white/5 px-4 py-3 rounded-lg border border-white/10 mb-3">
-                <div className="text-sm font-semibold text-white">
-                  {usuario?.nome}
-                </div>
-                <div className="text-xs text-accent-cream flex items-center gap-1 mt-1">
-                  {usuario?.role === "ADMIN" ? (
-                    <>
-                      <svg
-                        className="w-3 h-3"
-                        fill="currentColor"
-                        viewBox="0 0 20 20"
-                      >
-                        <path
-                          fillRule="evenodd"
-                          d="M5 2a1 1 0 011 1v1h1a1 1 0 010 2H6v1a1 1 0 01-2 0V6H3a1 1 0 010-2h1V3a1 1 0 011-1zm0 10a1 1 0 011 1v1h1a1 1 0 110 2H6v1a1 1 0 11-2 0v-1H3a1 1 0 110-2h1v-1a1 1 0 011-1zM12 2a1 1 0 01.967.744L14.146 7.2 17.5 9.134a1 1 0 010 1.732l-3.354 1.935-1.18 4.455a1 1 0 01-1.933 0L9.854 12.8 6.5 10.866a1 1 0 010-1.732l3.354-1.935 1.18-4.455A1 1 0 0112 2z"
-                          clipRule="evenodd"
-                        />
-                      </svg>
-                      Administrador
-                    </>
-                  ) : (
-                    "Funcionário"
-                  )}
+            <div className="mt-3 flex items-center gap-3 rounded-xl border border-white/10 bg-white/5 px-3 py-3 md:hidden">
+              <span className="grid h-9 w-9 place-items-center rounded-lg bg-linear-to-br from-[#3a7bff] to-[#2457b1] text-xs font-bold">{iniciais(usuario?.nome)}</span>
+              <div className="leading-tight">
+                <div className="text-sm font-semibold text-white">{usuario?.nome}</div>
+                <div className={`mt-0.5 flex items-center gap-1 text-xs ${ehAdmin ? "text-[#ffd84a]" : "text-slate-300"}`}>
+                  {ehAdmin && <Icone nome="shield" className="h-3 w-3" strokeWidth={2.2} />}
+                  {ehAdmin ? "Administrador" : "Funcionário"}
                 </div>
               </div>
             </div>
