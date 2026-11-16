@@ -35,6 +35,7 @@ const ExecutarRoteiro = lazy(() => import("./pages/ExecutarRoteiro").then(m => (
 const Roteiros = lazy(() => import("./pages/Roteiros").then(m => ({ default: m.Roteiros })));
 const GerenciarRoteiros = lazy(() => import("./pages/GerenciarRoteiros").then(m => ({ default: m.GerenciarRoteiros })));
 const Financeiro = lazy(() => import("./pages/Financeiro").then(m => ({ default: m.Financeiro })));
+const GestaoContas = lazy(() => import("./pages/GestaoContas").then(m => ({ default: m.GestaoContas })));
 const Graficos = lazy(() => import("./pages/Graficos").then(m => ({ default: m.Graficos })));
 const Relatorios = lazy(() => import("./pages/Relatorios").then(m => ({ default: m.Relatorios })));
 const AlertasEstoque = lazy(() => import("./pages/AlertasEstoque").then(m => ({ default: m.AlertasEstoque })));
@@ -234,6 +235,14 @@ function AppRoutes() {
             element={
               <PrivateRoute allowedRoles={["ADMIN", "FINANCEIRO"]}>
                 <Financeiro />
+              </PrivateRoute>
+            }
+          />
+          <Route
+            path="/financeiro/contas"
+            element={
+              <PrivateRoute allowedRoles={["ADMIN", "FINANCEIRO"]}>
+                <GestaoContas />
               </PrivateRoute>
             }
           />

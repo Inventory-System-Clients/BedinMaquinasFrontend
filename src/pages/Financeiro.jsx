@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { Link } from "react-router-dom";
 import api from "../services/api";
 import { Navbar } from "../components/Navbar";
 import { Footer } from "../components/Footer";
@@ -125,6 +126,11 @@ export function Financeiro() {
           title="Gestão Financeira"
           subtitle="Lance o dinheiro e o cartão total de cada ponto"
           icon="💰"
+          action={
+            <Link to="/financeiro/contas" className="btn-primary inline-flex items-center gap-2">
+              📒 Gestão de Contas
+            </Link>
+          }
         />
 
         {error && <AlertBox type="error" message={error} onClose={() => setError("")} />}
