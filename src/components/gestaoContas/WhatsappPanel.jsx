@@ -116,7 +116,6 @@ export default function WhatsappPanel() {
   async function salvarConfig(e) {
     e.preventDefault();
     const body = { ...form, diasAntes: Number(form.diasAntes), horaEnvio: Number(form.horaEnvio) };
-    if (!body.apiKey) delete body.apiKey;
     const r = await acao("config", () => gc.whatsappConfig(body), "Configuração salva.");
     if (r) setForm(null);
   }
@@ -188,9 +187,22 @@ export default function WhatsappPanel() {
           titulo="Número que envia os avisos"
           acao={<Selo estado={conexao.configurado ? conexao.estado : null} />}
         >
-          {!conexao.configurado ? (
+          {!config.evolutionConfigurada ? (
+            <div className="rounded-lg bg-amber-50 p-3 text-sm text-amber-900 ring-1 ring-amber-200">
+              <p className="font-semibold">Evolution API não configurada no servidor</p>
+              <p className="mt-1">
+                Defina {config.variaveisFaltando.map((v, i) => (
+                  <span key={v}>
+                    {i > 0 && " e "}
+                    <code className="rounded bg-amber-100 px-1 font-mono text-xs">{v}</code>
+                  </span>
+                ))}{" "}
+                nas variáveis de ambiente do backend (Render → Environment) e reinicie o serviço.
+              </p>
+            </div>
+          ) : !conexao.configurado ? (
             <p className="text-sm text-gray-600">
-              {ehAdmin ? "Preencha os dados da Evolution API abaixo para conectar o WhatsApp da empresa." : "Peça a um administrador para configurar e conectar o WhatsApp."}
+              {ehAdmin ? "Informe o nome da instância em “Configuração dos avisos” para conectar o WhatsApp da empresa." : "Peça a um administrador para configurar e conectar o WhatsApp."}
             </p>
           ) : conectado ? (
             <div className="flex items-start gap-3 rounded-lg bg-emerald-50 p-3 text-sm text-emerald-800">
@@ -257,7 +269,7 @@ export default function WhatsappPanel() {
               <Botao
                 pequeno
                 variante="contorno"
-                onClick={() => setForm({ evolutionUrl: config.evolutionUrl || "", instancia: config.instancia || "", apiKey: "", diasAntes: config.diasAntes, horaEnvio: config.horaEnvio })}
+                onClick={() => setForm({ instancia: config.instancia || "", diasAntes: config.diasAntes, horaEnvio: config.horaEnvio })}
               >
                 ✏️ Editar
               </Botao>
@@ -266,25 +278,9 @@ export default function WhatsappPanel() {
         >
           {form ? (
             <form onSubmit={salvarConfig} className="grid gap-3">
-              <Campo label="URL da Evolution API" dica="Servidor da Evolution API (o mesmo usado nos outros sistemas).">
-                <input className={inputCls} required placeholder="https://evolution.suaempresa.com.br" value={form.evolutionUrl} onChange={(e) => setForm({ ...form, evolutionUrl: e.target.value })} />
+              <Campo label="Nome da instância" dica="Nome do número na Evolution API, ex.: bedin-contas. A URL e a chave ficam protegidas no servidor.">
+                <input className={inputCls} required pattern="[\w.\-]{1,60}" value={form.instancia} onChange={(e) => setForm({ ...form, instancia: e.target.value })} />
               </Campo>
-              <div className="grid gap-3 sm:grid-cols-2">
-                <Campo label="Nome da instância" dica="Ex.: bedin-contas">
-                  <input className={inputCls} required pattern="[\w.\-]{1,60}" value={form.instancia} onChange={(e) => setForm({ ...form, instancia: e.target.value })} />
-                </Campo>
-                <Campo label="Chave (apikey)" dica={config.apiKeyConfigurada ? "Já configurada — deixe em branco para manter." : "Chave global da Evolution API."}>
-                  <input
-                    className={inputCls}
-                    type="password"
-                    autoComplete="new-password"
-                    required={!config.apiKeyConfigurada}
-                    placeholder={config.apiKeyConfigurada ? "••••••••" : ""}
-                    value={form.apiKey}
-                    onChange={(e) => setForm({ ...form, apiKey: e.target.value })}
-                  />
-                </Campo>
-              </div>
               <div className="grid gap-3 sm:grid-cols-2">
                 <Campo label="Avisar quantos dias antes" dica="0 = só no dia do vencimento.">
                   <input className={inputCls} type="number" min="0" max="30" value={form.diasAntes} onChange={(e) => setForm({ ...form, diasAntes: e.target.value })} />
@@ -315,7 +311,9 @@ export default function WhatsappPanel() {
                 </div>
                 <div>
                   <dt className="text-xs text-gray-500">Evolution API</dt>
-                  <dd className="truncate font-medium text-gray-800">{config.evolutionUrl || "Não configurada"}</dd>
+                  <dd className={`truncate font-medium ${config.evolutionConfigurada ? "text-emerald-700" : "text-amber-700"}`}>
+                    {config.evolutionConfigurada ? `Configurada no servidor ✓${config.evolutionHost ? ` (${config.evolutionHost})` : ""}` : "Faltam variáveis no servidor"}
+                  </dd>
                 </div>
                 <div>
                   <dt className="text-xs text-gray-500">Instância</dt>
