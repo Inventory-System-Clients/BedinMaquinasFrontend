@@ -117,7 +117,26 @@ export const gc = {
   criarLancamento: (body) => api.post(`${base}/lancamentos`, body).then((r) => r.data.lancamento),
   atualizarLancamento: (id, body) => api.put(`${base}/lancamentos/${id}`, body).then((r) => r.data.lancamento),
   excluirLancamento: (id) => api.delete(`${base}/lancamentos/${id}`),
+  // WhatsApp (avisos de vencimento)
+  whatsapp: () => api.get(`${base}/whatsapp`).then((r) => r.data),
+  whatsappPrevia: () => api.get(`${base}/whatsapp/previa`).then((r) => r.data.previa),
+  whatsappConfig: (body) => api.put(`${base}/whatsapp/config`, body).then((r) => r.data.config),
+  whatsappConectar: () => api.post(`${base}/whatsapp/conectar`).then((r) => r.data),
+  whatsappDesconectar: () => api.post(`${base}/whatsapp/desconectar`).then((r) => r.data.conexao),
+  whatsappTeste: (telefone) => api.post(`${base}/whatsapp/teste`, { telefone }).then((r) => r.data),
+  whatsappEnviarAgora: () => api.post(`${base}/whatsapp/enviar-agora`).then((r) => r.data.resultado),
+  criarDestinatario: (body) => api.post(`${base}/whatsapp/destinatarios`, body).then((r) => r.data.destinatario),
+  atualizarDestinatario: (id, body) => api.put(`${base}/whatsapp/destinatarios/${id}`, body).then((r) => r.data.destinatario),
+  excluirDestinatario: (id) => api.delete(`${base}/whatsapp/destinatarios/${id}`),
 };
+
+/** "5511987654321" → "(11) 98765-4321" */
+export function telefoneBR(numero) {
+  const d = String(numero || "").replace(/\D/g, "").replace(/^55(?=\d{10,11}$)/, "");
+  if (d.length === 11) return `(${d.slice(0, 2)}) ${d.slice(2, 7)}-${d.slice(7)}`;
+  if (d.length === 10) return `(${d.slice(0, 2)}) ${d.slice(2, 6)}-${d.slice(6)}`;
+  return numero || "";
+}
 
 // ------------------------------------------------------------------ Exportação
 

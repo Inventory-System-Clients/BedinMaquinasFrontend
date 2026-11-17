@@ -1,10 +1,11 @@
 import { Link, useNavigate, useLocation } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Icone } from "./dashboard/fx";
 import "./dashboard/dashboard.css";
 
-// Links do menu, com a mesma regra de permissão de antes.
+// Header enxuto (padrão AgarraMais): hambúrguer sempre visível + logo à esquerda,
+// usuário e Sair à direita. Os links abrem num painel sobreposto, sem empurrar a página.
 const LINKS = [
   { to: "/", label: "Dashboard", icone: "dashboard" },
   { to: "/movimentacoes", label: "Movimentações", icone: "box" },
@@ -12,8 +13,9 @@ const LINKS = [
   { to: "/lojas", label: "Lojas", icone: "store" },
   { to: "/produtos", label: "Produtos", icone: "tag" },
   { to: "/financeiro", label: "Financeiro", icone: "wallet", roles: ["ADMIN", "FINANCEIRO"] },
+  { to: "/financeiro/contas", label: "Gestão de Contas", icone: "coins", roles: ["ADMIN", "FINANCEIRO"] },
   { to: "/graficos", label: "Gráficos", icone: "chart", roles: ["ADMIN"] },
-  { to: "/alertas-estoque", label: "Alertas", labelMobile: "Alertas de Estoque", icone: "bell", roles: ["ADMIN"] },
+  { to: "/alertas-estoque", label: "Alertas de Estoque", icone: "bell", roles: ["ADMIN"] },
   { to: "/relatorios", label: "Relatórios", icone: "file", roles: ["ADMIN"] },
   { to: "/usuarios", label: "Usuários", icone: "users", roles: ["ADMIN"] },
 ];
@@ -28,6 +30,8 @@ export function Navbar() {
   const navigate = useNavigate();
   const location = useLocation();
   const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const menuRef = useRef(null);
+  const menuButtonRef = useRef(null);
 
   const handleLogout = () => {
     logout();
@@ -35,18 +39,56 @@ export function Navbar() {
   };
 
   const isActive = (path) => location.pathname === path;
-  const toggleMenu = () => setIsMenuOpen(!isMenuOpen);
   const closeMenu = () => setIsMenuOpen(false);
+
+  // Fecha ao clicar fora ou apertar Esc.
+  useEffect(() => {
+    if (!isMenuOpen) return undefined;
+    const clicarFora = (e) => {
+      if (menuRef.current?.contains(e.target) || menuButtonRef.current?.contains(e.target)) return;
+      setIsMenuOpen(false);
+    };
+    const tecla = (e) => {
+      if (e.key === "Escape") {
+        setIsMenuOpen(false);
+        menuButtonRef.current?.focus();
+      }
+    };
+    document.addEventListener("mousedown", clicarFora);
+    document.addEventListener("keydown", tecla);
+    return () => {
+      document.removeEventListener("mousedown", clicarFora);
+      document.removeEventListener("keydown", tecla);
+    };
+  }, [isMenuOpen]);
 
   const links = LINKS.filter((l) => !l.roles || l.roles.includes(usuario?.role));
   const ehAdmin = usuario?.role === "ADMIN";
+  // Página atual = link de caminho mais longo que casa com a URL (ex.: /financeiro/contas).
+  const paginaAtual =
+    location.pathname === "/"
+      ? LINKS[0]
+      : LINKS.filter((l) => l.to !== "/" && (location.pathname === l.to || location.pathname.startsWith(`${l.to}/`))).sort((a, b) => b.to.length - a.to.length)[0];
 
   return (
-    <nav className="bm-nav relative z-40 text-white">
-      <div className="mx-auto max-w-screen-2xl px-4 sm:px-6 lg:px-8">
+    <nav className="bm-nav relative z-50 text-white">
+      <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
         <div className="flex h-16 items-center justify-between gap-3 sm:h-18">
-          <div className="flex min-w-0 items-center gap-4">
-            <Link to="/" className="group flex shrink-0 items-center" title="Ir para o Dashboard">
+          <div className="flex min-w-0 items-center gap-2 sm:gap-3">
+            <button
+              ref={menuButtonRef}
+              onClick={() => setIsMenuOpen((v) => !v)}
+              className={`grid h-10 w-10 shrink-0 place-items-center rounded-xl border transition-colors ${
+                isMenuOpen ? "border-[#3ee6ff]/50 bg-white/15" : "border-white/10 bg-white/5 hover:bg-white/10"
+              }`}
+              aria-label={isMenuOpen ? "Fechar menu" : "Abrir menu"}
+              aria-expanded={isMenuOpen}
+              aria-controls="menu-principal"
+            >
+              <Icone nome={isMenuOpen ? "x" : "menu"} className="h-5 w-5" />
+            </button>
+
+            <Link to="/" onClick={closeMenu} className="group flex shrink-0 items-center" title="Ir para o Dashboard">
               {/* O PNG é quadrado com margem transparente: o tamanho maior compensa a margem. */}
               <img
                 src="/logo.png"
@@ -58,32 +100,25 @@ export function Navbar() {
               />
             </Link>
 
-            {/* Menu Desktop */}
-            <div className="hidden min-w-0 items-center gap-0.5 xl:flex">
-              {links.map((l) => (
-                <Link key={l.to} to={l.to} className={`bm-nav-link ${isActive(l.to) ? "is-active" : ""}`} aria-current={isActive(l.to) ? "page" : undefined}>
-                  <Icone nome={l.icone} className="h-4 w-4" />
-                  {l.label}
-                </Link>
-              ))}
-            </div>
+            {paginaAtual && (
+              <span className="hidden items-center gap-2 truncate border-l border-white/15 pl-3 text-sm font-medium text-slate-300 sm:flex">
+                <Icone nome={paginaAtual.icone} className="h-4 w-4 text-[#3ee6ff]" />
+                {paginaAtual.label}
+              </span>
+            )}
           </div>
 
           {/* User Info e Logout */}
           <div className="flex shrink-0 items-center gap-2 sm:gap-3">
-            {/* Entre xl e 2xl o menu ocupa a largura: o nome vira só o avatar (com dica). */}
-            <div
-              className="hidden items-center gap-2.5 rounded-xl border border-white/10 bg-white/5 py-1.5 pl-1.5 pr-3 md:flex xl:pr-1.5 2xl:pr-3"
-              title={`${usuario?.nome || ""} · ${ehAdmin ? "Administrador" : "Funcionário"}`}
-            >
+            <div className="hidden items-center gap-2.5 rounded-xl border border-white/10 bg-white/5 py-1.5 pl-1.5 pr-3 md:flex">
               <span className="grid h-8 w-8 place-items-center rounded-lg bg-linear-to-br from-[#3a7bff] to-[#2457b1] text-xs font-bold ring-1 ring-white/20">
                 {iniciais(usuario?.nome)}
               </span>
-              <div className="leading-tight xl:hidden 2xl:block">
+              <div className="leading-tight">
                 <div className="max-w-40 truncate text-sm font-semibold text-white">{usuario?.nome}</div>
                 <div className={`flex items-center gap-1 text-[11px] font-medium ${ehAdmin ? "text-[#ffd84a]" : "text-slate-300"}`}>
                   {ehAdmin && <Icone nome="shield" className="h-3 w-3" strokeWidth={2.2} />}
-                  {ehAdmin ? "Administrador" : "Funcionário"}
+                  {ehAdmin ? "Administrador" : usuario?.role === "FINANCEIRO" ? "Financeiro" : "Funcionário"}
                 </div>
               </div>
             </div>
@@ -94,23 +129,18 @@ export function Navbar() {
               <Icone nome="logout" className="h-4 w-4" />
               Sair
             </button>
-            {/* Botão Hamburger Mobile */}
-            <button
-              onClick={toggleMenu}
-              className="grid h-10 w-10 place-items-center rounded-xl border border-white/10 bg-white/5 transition-colors hover:bg-white/10 xl:hidden"
-              aria-label={isMenuOpen ? "Fechar menu" : "Abrir menu"}
-              aria-expanded={isMenuOpen}
-            >
-              <Icone nome={isMenuOpen ? "x" : "menu"} className="h-5 w-5" />
-            </button>
           </div>
         </div>
       </div>
 
-      {/* Menu Mobile Dropdown */}
+      {/* Painel do menu (todas as telas), sobreposto ao conteúdo */}
       {isMenuOpen && (
-        <div className="bm-menu-panel border-t border-white/10 bg-[#081329]/95 backdrop-blur xl:hidden">
-          <div className="max-w-7xl mx-auto px-4 py-3 sm:px-6 lg:px-8">
+        <div
+          id="menu-principal"
+          ref={menuRef}
+          className="bm-menu-panel absolute inset-x-0 top-full max-h-[calc(100vh-4.5rem)] overflow-y-auto border-t border-white/10 bg-[#081329]/97 shadow-2xl backdrop-blur"
+        >
+          <div className="mx-auto max-w-7xl px-4 py-4 sm:px-6 lg:px-8">
             <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2 lg:grid-cols-3">
               {links.map((l) => (
                 <Link
@@ -123,7 +153,7 @@ export function Navbar() {
                   }`}
                 >
                   <Icone nome={l.icone} className={`h-5 w-5 ${isActive(l.to) ? "text-[#3ee6ff]" : ""}`} />
-                  {l.labelMobile || l.label}
+                  {l.label}
                 </Link>
               ))}
             </div>
@@ -135,7 +165,7 @@ export function Navbar() {
                 <div className="text-sm font-semibold text-white">{usuario?.nome}</div>
                 <div className={`mt-0.5 flex items-center gap-1 text-xs ${ehAdmin ? "text-[#ffd84a]" : "text-slate-300"}`}>
                   {ehAdmin && <Icone nome="shield" className="h-3 w-3" strokeWidth={2.2} />}
-                  {ehAdmin ? "Administrador" : "Funcionário"}
+                  {ehAdmin ? "Administrador" : usuario?.role === "FINANCEIRO" ? "Financeiro" : "Funcionário"}
                 </div>
               </div>
             </div>

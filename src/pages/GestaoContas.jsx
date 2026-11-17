@@ -9,6 +9,7 @@ import ResumoPanel from "../components/gestaoContas/ResumoPanel";
 import ContasPanel from "../components/gestaoContas/ContasPanel";
 import BancosPanel from "../components/gestaoContas/BancosPanel";
 import FluxoCaixaPanel from "../components/gestaoContas/FluxoCaixaPanel";
+import WhatsappPanel from "../components/gestaoContas/WhatsappPanel";
 
 // Financeiro → Gestão de Contas: controle de contas da empresa (a pagar, a receber,
 // contas bancárias e fluxo de caixa), no mesmo modelo do financeiro da Reblind.
@@ -19,6 +20,7 @@ const ABAS = [
   ["receber", "📥 Contas a receber"],
   ["bancos", "🏦 Contas bancárias"],
   ["fluxo", "💵 Fluxo de caixa"],
+  ["whatsapp", "📲 WhatsApp"],
 ];
 
 /** Bolinha na aba: vermelha piscando com conta vencida, laranja com conta vencendo em breve. */
@@ -124,6 +126,7 @@ export function GestaoContas() {
           {aba === "receber" && <ContasPanel key="RECEBER" tipo="RECEBER" {...props} />}
           {aba === "bancos" && <BancosPanel onAlterado={alterado} />}
           {aba === "fluxo" && <FluxoCaixaPanel {...props} />}
+          {aba === "whatsapp" && <WhatsappPanel />}
         </div>
         <Footer />
       </div>
