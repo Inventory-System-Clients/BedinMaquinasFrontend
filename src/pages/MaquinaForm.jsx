@@ -29,6 +29,10 @@ export function MaquinaForm() {
     ativo: true,
     machinePayPosId: "",
     machinePayUsrId: "",
+    // Trazidos da AgarraMais (Movimentações / Registrar Dinheiro)
+    descontoAutomaticoMachinePay: false,
+    valorDescontoMachinePay: "",
+    geradoraDinheiro: false,
   });
 
   const [lojas, setLojas] = useState([]);
@@ -84,6 +88,9 @@ export function MaquinaForm() {
         ativo: response.data.ativo !== undefined ? response.data.ativo : true,
         machinePayPosId: response.data.machinePayPosId || "",
         machinePayUsrId: response.data.machinePayUsrId || "",
+        descontoAutomaticoMachinePay: response.data.descontoAutomaticoMachinePay || false,
+        valorDescontoMachinePay: response.data.valorDescontoMachinePay || "",
+        geradoraDinheiro: response.data.geradoraDinheiro || false,
       });
       if (response.data.machinePayUsrId) {
         setMostrarAvancado(true);
@@ -155,6 +162,11 @@ export function MaquinaForm() {
         ativo: formData.ativo,
         machinePayPosId: formData.machinePayPosId?.trim() || null,
         machinePayUsrId: formData.machinePayUsrId?.trim() || null,
+        descontoAutomaticoMachinePay: formData.descontoAutomaticoMachinePay,
+        valorDescontoMachinePay: formData.descontoAutomaticoMachinePay
+          ? parseFloat(formData.valorDescontoMachinePay) || null
+          : null,
+        geradoraDinheiro: formData.geradoraDinheiro,
       };
 
       console.log("Dados enviados:", JSON.stringify(data, null, 2)); // Debug detalhado
@@ -564,6 +576,65 @@ export function MaquinaForm() {
                   <p className="text-xs text-gray-500 mt-1">
                     Identificador do leitor PIX/cartão vinculado a esta máquina no painel Machine Pay (opcional)
                   </p>
+                </div>
+
+                {/* Trazidos da AgarraMais (Movimentações / Registrar Dinheiro) */}
+                <div>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      name="geradoraDinheiro"
+                      checked={formData.geradoraDinheiro}
+                      onChange={handleChange}
+                      className="w-5 h-5 rounded"
+                    />
+                    <span className="text-sm font-semibold text-gray-700">
+                      Máquina geradora de dinheiro
+                    </span>
+                  </label>
+                  <p className="text-xs text-gray-500 mt-1">
+                    Se marcado, a máquina aparece na lista do Registrar Dinheiro (tela de Movimentações).
+                  </p>
+                </div>
+
+                <div className="flex items-center">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      name="descontoAutomaticoMachinePay"
+                      checked={formData.descontoAutomaticoMachinePay}
+                      onChange={handleChange}
+                      className="w-5 h-5 rounded"
+                    />
+                    <span className="text-sm font-semibold text-gray-700">
+                      Descontar automático através da Machine Pay
+                    </span>
+                  </label>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-2">
+                    Valor do desconto
+                  </label>
+                  <input
+                    type="number"
+                    name="valorDescontoMachinePay"
+                    value={formData.valorDescontoMachinePay}
+                    onChange={handleChange}
+                    className="input-field"
+                    placeholder="Ex: 30"
+                    step="0.01"
+                    min="0"
+                    disabled={!formData.descontoAutomaticoMachinePay}
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    A cada esse valor pago na Machine Pay, a próxima coleta já vem com o Total Pré sugerido 1 a menos.
+                  </p>
+                  {formData.descontoAutomaticoMachinePay && !formData.machinePayPosId?.trim() && (
+                    <p className="text-xs text-amber-600 mt-1">
+                      Preencha o ID da Machine Pay (POS) para o desconto automático funcionar.
+                    </p>
+                  )}
                 </div>
               </div>
 

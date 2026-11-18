@@ -6,7 +6,6 @@ import { AuthProvider } from "./contexts/AuthContext";
 import { useAuth } from "./contexts/AuthContext";
 import { PrivateRoute } from "./components/PrivateRoute";
 import { PageLoader } from "./components/Loading";
-import { AlertaFinanceiro } from "./components/AlertaFinanceiro";
 import RoteiroLocationTracker from "./components/RoteiroLocationTracker.jsx";
 
 // Lazy load das páginas para reduzir bundle inicial
@@ -28,13 +27,12 @@ const MaquinaDetalhes = lazy(() => import("./pages/MaquinaDetalhes").then(m => (
 const Produtos = lazy(() => import("./pages/Produtos").then(m => ({ default: m.Produtos })));
 const ProdutoForm = lazy(() => import("./pages/ProdutoForm").then(m => ({ default: m.ProdutoForm })));
 const Movimentacoes = lazy(() => import("./pages/Movimentacoes").then(m => ({ default: m.Movimentacoes })));
-const SelecionarRoteiro = lazy(() => import("./pages/SelecionarRoteiro").then(m => ({ default: m.SelecionarRoteiro })));
 const LojasRoteiro = lazy(() => import("./pages/LojasRoteiro").then(m => ({ default: m.LojasRoteiro })));
 const MovimentacoesLoja = lazy(() => import("./pages/MovimentacoesLoja").then(m => ({ default: m.MovimentacoesLoja })));
 const ExecutarRoteiro = lazy(() => import("./pages/ExecutarRoteiro").then(m => ({ default: m.ExecutarRoteiro })));
 const Roteiros = lazy(() => import("./pages/Roteiros").then(m => ({ default: m.Roteiros })));
 const GerenciarRoteiros = lazy(() => import("./pages/GerenciarRoteiros").then(m => ({ default: m.GerenciarRoteiros })));
-const Financeiro = lazy(() => import("./pages/Financeiro").then(m => ({ default: m.Financeiro })));
+const Sangrias = lazy(() => import("./pages/Sangrias").then(m => ({ default: m.Sangrias })));
 const GestaoContas = lazy(() => import("./pages/GestaoContas").then(m => ({ default: m.GestaoContas })));
 const Graficos = lazy(() => import("./pages/Graficos").then(m => ({ default: m.Graficos })));
 const Relatorios = lazy(() => import("./pages/Relatorios").then(m => ({ default: m.Relatorios })));
@@ -48,7 +46,6 @@ function AppRoutes() {
     <BrowserRouter>
       <Suspense fallback={<PageLoader />}>
         <RoteiroLocationTracker usuario={usuario} />
-        <AlertaFinanceiro />
         <Routes>
           <Route path="/login" element={<Login />} />
           <Route path="/registrar" element={<Registrar />} />
@@ -186,7 +183,7 @@ function AppRoutes() {
             path="/movimentacoes"
             element={
               <PrivateRoute>
-                <SelecionarRoteiro />
+                <Movimentacoes />
               </PrivateRoute>
             }
           />
@@ -230,22 +227,25 @@ function AppRoutes() {
               </PrivateRoute>
             }
           />
+          {/* Sangrias (trazido da AgarraMais; botão na tela de Movimentações) */}
           <Route
-            path="/financeiro"
+            path="/sangrias"
             element={
-              <PrivateRoute allowedRoles={["ADMIN", "FINANCEIRO"]}>
-                <Financeiro />
+              <PrivateRoute>
+                <Sangrias />
               </PrivateRoute>
             }
           />
+          {/* Financeiro = Gestão de Contas (o lançamento manual por ponto saiu). */}
           <Route
-            path="/financeiro/contas"
+            path="/financeiro"
             element={
               <PrivateRoute allowedRoles={["ADMIN", "FINANCEIRO"]}>
                 <GestaoContas />
               </PrivateRoute>
             }
           />
+          <Route path="/financeiro/contas" element={<Navigate to="/financeiro" replace />} />
           <Route
             path="/graficos"
             element={

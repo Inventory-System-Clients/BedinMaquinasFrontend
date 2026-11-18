@@ -12,8 +12,8 @@ const LINKS = [
   { to: "/maquinas", label: "Máquinas", icone: "gamepad" },
   { to: "/lojas", label: "Lojas", icone: "store" },
   { to: "/produtos", label: "Produtos", icone: "tag" },
+  // Financeiro = Gestão de Contas (contas a pagar/receber, bancos, fluxo de caixa, WhatsApp)
   { to: "/financeiro", label: "Financeiro", icone: "wallet", roles: ["ADMIN", "FINANCEIRO"] },
-  { to: "/financeiro/contas", label: "Gestão de Contas", icone: "coins", roles: ["ADMIN", "FINANCEIRO"] },
   { to: "/graficos", label: "Gráficos", icone: "chart", roles: ["ADMIN"] },
   { to: "/alertas-estoque", label: "Alertas de Estoque", icone: "bell", roles: ["ADMIN"] },
   { to: "/relatorios", label: "Relatórios", icone: "file", roles: ["ADMIN"] },
@@ -64,7 +64,7 @@ export function Navbar() {
 
   const links = LINKS.filter((l) => !l.roles || l.roles.includes(usuario?.role));
   const ehAdmin = usuario?.role === "ADMIN";
-  // Página atual = link de caminho mais longo que casa com a URL (ex.: /financeiro/contas).
+  // Página atual = link de caminho mais longo que casa com a URL (ex.: /movimentacoes/roteiro/...).
   const paginaAtual =
     location.pathname === "/"
       ? LINKS[0]

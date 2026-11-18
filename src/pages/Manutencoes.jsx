@@ -4,6 +4,7 @@ import { AlertBox, PageHeader } from "../components/UIComponents";
 import { PageLoader } from "../components/Loading";
 import { Navbar } from "../components/Navbar";
 import { useAuth } from "../contexts/AuthContext";
+import { AlertasMovimentacaoPanel } from "../components/AlertasMovimentacaoPanel";
 
 const normalizarStatusManutencao = status => String(status || "").trim().toLowerCase();
 const isUrgente = status => normalizarStatusManutencao(status) === "urgente";
@@ -306,6 +307,8 @@ function Manutencoes() {
       <Navbar />
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         <PageHeader title="Manutenções" subtitle="Acompanhe todas as manutenções registradas" icon="🛠️" />
+        {/* Alertas da tela de Movimentações (padrão AgarraMais) — só admin */}
+        {isAdmin && <AlertasMovimentacaoPanel />}
         {isAdmin && (
           <div className="mb-4">
             <button className="btn-primary" onClick={() => setShowNovaManutencao(true)}>Nova Manutenção</button>

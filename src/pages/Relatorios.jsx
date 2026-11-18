@@ -734,7 +734,8 @@ export function Relatorios() {
                     valorEntradaFichasNormalizado: fichas,
                     valorFinanceiroTotal: totalFinanceiro,
                     numeroSacolaNormalizado: numeroSacola,
-                    financeiroPendente: mov.statusFinanceiro === "pendente",
+                    // O lançamento manual do Financeiro saiu: só é "pendente" se não há valor nenhum.
+                    financeiroPendente: mov.statusFinanceiro === "pendente" && !(toNumber(totalFinanceiro) > 0),
                   };
                 });
 

@@ -1,4 +1,5 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 import api from "../services/api";
 import { Navbar } from "../components/Navbar";
 import { Footer } from "../components/Footer";
@@ -8,39 +9,86 @@ import {
   DataTable,
   Badge,
   AlertBox,
+  ConfirmDialog,
 } from "../components/UIComponents";
+import RegistrarDinheiro from "../components/RegistrarDinheiro";
+import LancarGastoVariavel from "../components/LancarGastoVariavel";
 import { PageLoader, EmptyState } from "../components/Loading";
 import { useAuth } from "../contexts/AuthContext";
 import AvisosMaquinasFaltam from "../components/AvisosMaquinasFaltam";
 import TabelaMovimentacoesEstoqueDeLoja from "../components/TabelaMovimentacoesEstoqueDeLoja";
-import { MovimentacaoInconsistenteModal } from "../components/MovimentacaoInconsistenteModal";
 import {
-  TIPO_OCORRENCIA_INCONSISTENCIA,
-  montarObservacaoInconsistencia,
-  validarInconsistenciasMovimentacao,
-} from "../utils/movimentacaoInconsistencias";
+  salvarFotoUltimaMovimentacao,
+  obterFotoUltimaMovimentacao,
+  limparFotoUltimaMovimentacao,
+} from "../services/fotoUltimaMovimentacaoDb";
 
-const toDatetimeLocalValue = (value) => {
-  if (!value) return "";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "";
-  const localDate = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
-  return localDate.toISOString().slice(0, 16);
-};
+const CHAVE_ULTIMA_MENSAGEM_WHATSAPP = "ultimaMensagemMovimentacaoWhatsapp";
 
-const toBackendDatetimeValue = (value) => {
-  if (!value) return "";
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toISOString();
-};
+// Salto grande demais no contador de um registro pro outro costuma ser erro
+// de leitura/digitação (ex: trocar os dois contadores, ou digitar um dígito
+// a mais). Acima desses limites, exige confirmação explícita do operador
+// antes de deixar registrar.
+const LIMITE_DIFERENCA_CONTADOR_IN = 300;
+const LIMITE_DIFERENCA_CONTADOR_OUT = 40;
 
-const getBackendErrorMessage = (error, fallback) =>
-  error.response?.data?.error ||
-  error.response?.data?.message ||
-  error.response?.data?.erro ||
-  fallback;
+// Em celular (onde os funcionários realmente usam isso, no chão de loja),
+// abrir uma aba em branco e só depois redirecioná-la pra wa.me é frágil: em
+// vários navegadores/WebViews Android essa aba fica presa em "about:blank"
+// e nunca navega, deixando quem tá coletando sem conseguir mandar a
+// mensagem. Por isso, em celular, nem abrimos aba nova — navegamos a
+// própria aba pra wa.me (nunca é bloqueado por popup blocker, já que não é
+// popup). Em desktop mantemos o truque de abrir em branco: Safari/iOS só
+// permite abrir uma nova aba (ou usar navigator.share) de forma síncrona,
+// dentro do mesmo gesto de clique, e como o envio ao WhatsApp só acontece
+// depois de um `await` (chamada à API) essa permissão já expirou quando
+// chegamos lá.
+// Link do WhatsApp: api.whatsapp.com/send direto. O redirecionamento do wa.me troca os
+// emojis da mensagem por "�" (ex.: "Sim ✅" chegava "Sim �") — problema que também
+// existe na AgarraMais.
+const ehDispositivoMovel = () =>
+  /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent || "");
+
+function abrirJanelaWhatsapp() {
+  if (ehDispositivoMovel()) return null;
+  try {
+    return window.open("", "_blank");
+  } catch {
+    return null;
+  }
+}
+
+// Navega pra URL do WhatsApp usando a janela pré-aberta (desktop) ou a
+// própria aba (celular). Ver abrirJanelaWhatsapp() acima pro porquê.
+function navegarParaWhatsapp(janelaPreAberta, url) {
+  if (ehDispositivoMovel()) {
+    if (janelaPreAberta && !janelaPreAberta.closed) janelaPreAberta.close();
+    window.location.href = url;
+    return;
+  }
+
+  if (janelaPreAberta && !janelaPreAberta.closed) {
+    janelaPreAberta.location.href = url;
+  } else {
+    window.open(url, "_blank", "noopener,noreferrer");
+  }
+}
+
+// Nome da origem dos pagamentos usada na sugestão de Total Pré
+// (/movimentacoes/sugestao-total-pre devolve "machinePay", "compactPay" ou
+// "ambos" quando a máquina tem os dois IDs).
+const nomeFontePagamento = (fonte) =>
+  fonte === "ambos"
+    ? "Machine Pay + CompactPay"
+    : fonte === "compactPay"
+      ? "CompactPay"
+      : "Machine Pay";
 
 export function Movimentacoes() {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const [modalRegistrarDinheiro, setModalRegistrarDinheiro] = useState(false);
+  const [modalGastoVariavel, setModalGastoVariavel] = useState(false);
   const { usuario } = useAuth();
 
   // --- ESTADOS ---
@@ -49,7 +97,8 @@ export function Movimentacoes() {
 
   // Filtros Estoque Loja
   const [filtroLojaEstoque, setFiltroLojaEstoque] = useState("");
-  const [filtroDataEstoque, setFiltroDataEstoque] = useState("");
+  const [filtroDataInicioEstoque, setFiltroDataInicioEstoque] = useState("");
+  const [filtroDataFimEstoque, setFiltroDataFimEstoque] = useState("");
   const [filtroResponsavelEstoque, setFiltroResponsavelEstoque] = useState("");
 
   // Ações Estoque Loja
@@ -60,6 +109,7 @@ export function Movimentacoes() {
   const [maquinas, setMaquinas] = useState([]);
   const [produtos, setProdutos] = useState([]);
   const [lojas, setLojas] = useState([]);
+  const [veiculos, setVeiculos] = useState([]);
 
   // UI States
   const [loading, setLoading] = useState(true);
@@ -67,9 +117,23 @@ export function Movimentacoes() {
   const [success, setSuccess] = useState("");
   const [showForm, setShowForm] = useState(false);
   const [salvandoMovimentacao, setSalvandoMovimentacao] = useState(false);
-  const [modalInconsistencia, setModalInconsistencia] = useState(null);
-  const [justificativaInconsistencia, setJustificativaInconsistencia] =
-    useState("");
+  const [mostrarConfirmacaoMovimentacao, setMostrarConfirmacaoMovimentacao] =
+    useState(false);
+  const [fotoContadores, setFotoContadores] = useState(null);
+  const [fotoContadoresPreview, setFotoContadoresPreview] = useState("");
+  const [lendoFotoContadores, setLendoFotoContadores] = useState(false);
+  const [resultadoFotoContadores, setResultadoFotoContadores] = useState("");
+  const movimentacaoEmEnvioRef = useRef(false);
+  const [movimentacaoAssistentePendente, setMovimentacaoAssistentePendente] =
+    useState(null);
+  const [alertaOrigemId, setAlertaOrigemId] = useState(null);
+  const [naoVaiRegistrar, setNaoVaiRegistrar] = useState(false);
+  const [mostrarObsAlerta, setMostrarObsAlerta] = useState(false);
+  const [obsAlerta, setObsAlerta] = useState("");
+  const [enviandoAlerta, setEnviandoAlerta] = useState(false);
+  const [temMensagemSalva, setTemMensagemSalva] = useState(
+    () => !!localStorage.getItem(CHAVE_ULTIMA_MENSAGEM_WHATSAPP),
+  );
 
   // Filtros Movimentações
   const [filtroLojaForm, setFiltroLojaForm] = useState("");
@@ -78,11 +142,10 @@ export function Movimentacoes() {
   // Edição
   const [editandoMovimentacao, setEditandoMovimentacao] = useState(null);
   const [formEdicao, setFormEdicao] = useState({
+    fichas: "",
     abastecidas: "",
     quantidade_notas_entrada: "",
     valor_entrada_maquininha_pix: "",
-    valorEntradaNotas: "",
-    dataColeta: "",
   });
 
   // Formulário Nova Movimentação
@@ -91,17 +154,43 @@ export function Movimentacoes() {
     produto_id: "",
     quantidadeAtualMaquina: "",
     quantidadeAdicionada: "",
+    fichas: "",
     contadorIn: "",
     contadorOut: "",
     quantidade_notas_entrada: "",
     valor_entrada_maquininha_pix: "",
-    valorEntradaNotas: "",
     observacao: "",
     retiradaEstoque: false,
+    retiradaProduto: 0,
+    ignoreInOut: false,
   });
 
   // Estados auxiliares
   const [estoqueAnterior, setEstoqueAnterior] = useState(0);
+  const [saidasCompactPay, setSaidasCompactPay] = useState(null);
+  const [alertaDivergencia, setAlertaDivergencia] = useState(null);
+  // Sugestão de Total Pré via Machine Pay (máquinas com desconto automático
+  // ativado), ver useEffect abaixo. modo "auto" trava o campo com o valor
+  // calculado; "forcar_manual" (a cada 15 dias sem conferência manual)
+  // libera o campo pro operador digitar, mas mantém o valor calculado pra
+  // comparação/alerta de divergência.
+  const [sugestaoTotalPreMachinePay, setSugestaoTotalPreMachinePay] =
+    useState(null);
+  const [carregandoSugestaoMachinePay, setCarregandoSugestaoMachinePay] =
+    useState(false);
+  const [
+    confirmacaoDivergenciaMachinePay,
+    setConfirmacaoDivergenciaMachinePay,
+  ] = useState(false);
+
+  // Últimos contadores registrados da máquina selecionada, para detectar
+  // salto suspeito no IN/OUT (ver LIMITE_DIFERENCA_CONTADOR_IN/OUT acima).
+  const [ultimoContadorMaquina, setUltimoContadorMaquina] = useState({
+    contadorIn: null,
+    contadorOut: null,
+  });
+  const [confirmacaoContadorIn, setConfirmacaoContadorIn] = useState(false);
+  const [confirmacaoContadorOut, setConfirmacaoContadorOut] = useState(false);
 
   // --- EFEITOS ---
   useEffect(() => {
@@ -109,31 +198,362 @@ export function Movimentacoes() {
     carregarMovimentacoesEstoqueLoja();
   }, []);
 
+  useEffect(() => {
+    return () => {
+      if (fotoContadoresPreview) {
+        URL.revokeObjectURL(fotoContadoresPreview);
+      }
+    };
+  }, [fotoContadoresPreview]);
+
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const state = location.state || {};
+    const deveAbrirFormulario =
+      state.abrirFormulario === true ||
+      state.autoAbrirMovimentacao === true ||
+      params.get("abrirFormulario") === "true";
+    const modo = state.modo || params.get("modo");
+
+    if (!deveAbrirFormulario || modo !== "nova_movimentacao") {
+      return;
+    }
+
+    setMovimentacaoAssistentePendente({
+      lojaId: state.lojaId ?? params.get("lojaId") ?? "",
+      maquinaId: state.maquinaId ?? params.get("maquinaId") ?? "",
+      contadorIn: state.contadorIn ?? params.get("contadorIn") ?? "",
+      contadorOut: state.contadorOut ?? params.get("contadorOut") ?? "",
+      produtoId: state.produtoId ?? params.get("produtoId") ?? "",
+      quantidadeAtualMaquina:
+        state.quantidadeAtualMaquina ??
+        params.get("quantidadeAtualMaquina") ??
+        "",
+      quantidadeAdicionada:
+        state.quantidadeAdicionada ?? params.get("quantidadeAdicionada") ?? "",
+      fichas: state.fichas ?? params.get("fichas") ?? "",
+      quantidade_notas_entrada:
+        state.quantidade_notas_entrada ??
+        params.get("quantidade_notas_entrada") ??
+        "",
+      valor_entrada_maquininha_pix:
+        state.valor_entrada_maquininha_pix ??
+        params.get("valor_entrada_maquininha_pix") ??
+        "",
+      observacao: state.observacao ?? params.get("observacao") ?? "",
+      alertaId: state.alertaId ?? params.get("alertaId") ?? null,
+    });
+  }, [location.search, location.state]);
+
+  useEffect(() => {
+    if (!movimentacaoAssistentePendente || loading) {
+      return;
+    }
+
+    const lojaId = movimentacaoAssistentePendente.lojaId
+      ? String(movimentacaoAssistentePendente.lojaId)
+      : "";
+    const maquinaId = movimentacaoAssistentePendente.maquinaId
+      ? String(movimentacaoAssistentePendente.maquinaId)
+      : "";
+    const contadorIn =
+      movimentacaoAssistentePendente.contadorIn !== undefined &&
+      movimentacaoAssistentePendente.contadorIn !== null
+        ? String(movimentacaoAssistentePendente.contadorIn)
+        : "";
+    const contadorOut =
+      movimentacaoAssistentePendente.contadorOut !== undefined &&
+      movimentacaoAssistentePendente.contadorOut !== null
+        ? String(movimentacaoAssistentePendente.contadorOut)
+        : "";
+    const campoOuVazio = (valor) =>
+      valor !== undefined && valor !== null ? String(valor) : "";
+
+    setShowForm(true);
+    setFiltroLojaForm(lojaId);
+    setFormData((prev) => ({
+      ...prev,
+      maquina_id: maquinaId,
+      produto_id: campoOuVazio(movimentacaoAssistentePendente.produtoId),
+      contadorIn,
+      contadorOut,
+      quantidadeAtualMaquina: campoOuVazio(
+        movimentacaoAssistentePendente.quantidadeAtualMaquina,
+      ),
+      quantidadeAdicionada: campoOuVazio(
+        movimentacaoAssistentePendente.quantidadeAdicionada,
+      ),
+      fichas: campoOuVazio(movimentacaoAssistentePendente.fichas),
+      quantidade_notas_entrada: campoOuVazio(
+        movimentacaoAssistentePendente.quantidade_notas_entrada,
+      ),
+      valor_entrada_maquininha_pix: campoOuVazio(
+        movimentacaoAssistentePendente.valor_entrada_maquininha_pix,
+      ),
+      observacao: campoOuVazio(movimentacaoAssistentePendente.observacao),
+    }));
+    setAlertaOrigemId(movimentacaoAssistentePendente.alertaId || null);
+    setMovimentacaoAssistentePendente(null);
+
+    queueMicrotask(() => {
+      document
+        .getElementById("form-nova-movimentacao")
+        ?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  }, [movimentacaoAssistentePendente, loading]);
+
   // Atualizar estoque anterior quando seleciona máquina
   useEffect(() => {
     if (formData.maquina_id) {
-      const maquina = maquinas.find((m) => m.id === formData.maquina_id);
+      const maquina = maquinas.find(
+        (m) => String(m.id) === String(formData.maquina_id),
+      );
       if (maquina) {
         setEstoqueAnterior(maquina.estoqueAtual || 0);
       }
     }
   }, [formData.maquina_id, maquinas]);
 
+  // Verificar divergência entre contador OUT e total pre informado
+  useEffect(() => {
+    const verificarDivergencia = async () => {
+      // Só verificar se temos máquina selecionada, contador OUT e total pre preenchidos
+      if (
+        !formData.maquina_id ||
+        !formData.contadorOut ||
+        !formData.quantidadeAtualMaquina
+      ) {
+        setAlertaDivergencia(null);
+        return;
+      }
+
+      const contadorOutAtual = parseInt(formData.contadorOut);
+      const totalPreInformado = parseInt(formData.quantidadeAtualMaquina);
+
+      // Validar se são números válidos
+      if (isNaN(contadorOutAtual) || isNaN(totalPreInformado)) {
+        setAlertaDivergencia(null);
+        return;
+      }
+
+      try {
+        // Buscar última movimentação da máquina
+        const response = await api.get(
+          `/movimentacoes?maquinaId=${formData.maquina_id}&limite=1`,
+        );
+        const movimentacoes = response.data;
+
+        if (movimentacoes && movimentacoes.length > 0) {
+          const ultimaMov = movimentacoes[0];
+          const contadorOutAnterior = ultimaMov.contadorOut || 0;
+          const totalPosAnterior = ultimaMov.totalPos || 0;
+
+          // Calcular quantos produtos saíram baseado no contador OUT
+          const saidaCalculada = contadorOutAtual - contadorOutAnterior;
+
+          // Calcular qual deveria ser o total pre esperado
+          const totalPreEsperado = totalPosAnterior - saidaCalculada;
+
+          // Se houver divergência, mostrar alerta
+          const diferenca = Math.abs(totalPreInformado - totalPreEsperado);
+          if (diferenca > 0) {
+            setAlertaDivergencia({
+              totalPreInformado,
+              totalPreEsperado,
+              diferenca,
+              saidaCalculada,
+              totalPosAnterior,
+              contadorOutAnterior,
+              contadorOutAtual,
+            });
+          } else {
+            setAlertaDivergencia(null);
+          }
+        } else {
+          // Não há movimentação anterior, não há como comparar
+          setAlertaDivergencia(null);
+        }
+      } catch (error) {
+        console.error("Erro ao verificar divergência:", error);
+        setAlertaDivergencia(null);
+      }
+    };
+
+    verificarDivergencia();
+  }, [
+    formData.maquina_id,
+    formData.contadorOut,
+    formData.quantidadeAtualMaquina,
+  ]);
+
+  // Busca o último contador IN/OUT registrado da máquina selecionada, para
+  // comparar com o que o operador está digitando agora e detectar salto
+  // suspeito (ver LIMITE_DIFERENCA_CONTADOR_IN/OUT).
+  useEffect(() => {
+    if (!formData.maquina_id) {
+      setUltimoContadorMaquina({ contadorIn: null, contadorOut: null });
+      return;
+    }
+
+    let cancelado = false;
+
+    api
+      .get(`/movimentacoes?maquinaId=${formData.maquina_id}&limite=1`)
+      .then((response) => {
+        if (cancelado) return;
+        const ultimaMov = response.data?.[0];
+        setUltimoContadorMaquina({
+          contadorIn: ultimaMov?.contadorIn ?? null,
+          contadorOut: ultimaMov?.contadorOut ?? null,
+        });
+      })
+      .catch(() => {
+        if (!cancelado) {
+          setUltimoContadorMaquina({ contadorIn: null, contadorOut: null });
+        }
+      });
+
+    return () => {
+      cancelado = true;
+    };
+  }, [formData.maquina_id]);
+
+  // Para máquinas com "desconto automático via Machine Pay" ativado, busca
+  // quanto já entrou na Machine Pay desde a última coleta e calcula o Total
+  // Pré esperado (totalPos anterior menos 1 pulso pra cada
+  // valorDescontoMachinePay recebido). Em modo "auto" trava o campo e
+  // preenche com o valor calculado; a cada 15 dias sem conferência manual o
+  // backend devolve modo "forcar_manual" — aí o campo fica liberado pro
+  // operador contar fisicamente, e o valor calculado só serve pra comparar
+  // e alertar se o que ele digitou não bater (ver alertaSubmit mais abaixo).
+  useEffect(() => {
+    setSugestaoTotalPreMachinePay(null);
+    setCarregandoSugestaoMachinePay(false);
+
+    if (!formData.maquina_id) return;
+
+    const maquina = maquinas.find(
+      (m) => String(m.id) === String(formData.maquina_id),
+    );
+    if (!maquina?.descontoAutomaticoMachinePay) return;
+
+    let cancelado = false;
+    setCarregandoSugestaoMachinePay(true);
+
+    api
+      .get(`/movimentacoes/sugestao-total-pre/${formData.maquina_id}`)
+      .then((response) => {
+        if (cancelado) return;
+        const dados = response.data;
+        setSugestaoTotalPreMachinePay(dados || null);
+
+        if (dados?.sugestaoDisponivel && dados.modo === "auto") {
+          setFormData((prev) => ({
+            ...prev,
+            quantidadeAtualMaquina: String(dados.sugestaoTotalPre),
+          }));
+        }
+      })
+      .catch(() => {
+        if (!cancelado) setSugestaoTotalPreMachinePay(null);
+      })
+      .finally(() => {
+        if (!cancelado) setCarregandoSugestaoMachinePay(false);
+      });
+
+    return () => {
+      cancelado = true;
+    };
+  }, [formData.maquina_id, maquinas]);
+
+  // Só admin: prêmios que o sensor de saída da placa CompactPay contou desde
+  // a última movimentação (o "Prêmios entregues" do painel CompactPay no
+  // período entre movimentações). Funcionário não vê pra não copiar o número.
+  useEffect(() => {
+    setSaidasCompactPay(null);
+    if (!formData.maquina_id || usuario?.role !== "ADMIN") return;
+
+    const maquina = maquinas.find(
+      (m) => String(m.id) === String(formData.maquina_id),
+    );
+    if (!maquina?.compactPayId || !maquina?.conferirSaidaCompactPay) return;
+
+    let cancelado = false;
+    setSaidasCompactPay({ carregando: true });
+    api
+      .get(`/movimentacoes/saidas-compactpay/${formData.maquina_id}`)
+      .then((response) => {
+        if (!cancelado) setSaidasCompactPay(response.data || null);
+      })
+      .catch(() => {
+        if (!cancelado) setSaidasCompactPay({ erro: true });
+      });
+
+    return () => {
+      cancelado = true;
+    };
+  }, [formData.maquina_id, maquinas, usuario?.role]);
+
+  // Cada vez que o operador muda o valor digitado, a confirmação de
+  // "certeza que está correto" anterior deixa de valer.
+  useEffect(() => {
+    setConfirmacaoContadorIn(false);
+  }, [formData.contadorIn, formData.maquina_id]);
+
+  useEffect(() => {
+    setConfirmacaoContadorOut(false);
+  }, [formData.contadorOut, formData.maquina_id]);
+
+  useEffect(() => {
+    setConfirmacaoDivergenciaMachinePay(false);
+  }, [formData.quantidadeAtualMaquina, formData.maquina_id]);
+
+  // Sugere produto automaticamente ao escolher máquina, mas permite troca manual
+  // Sugere produto via backend ao escolher máquina
+  useEffect(() => {
+    if (!formData.maquina_id) return;
+    if (formData.produto_id) return;
+    // Busca produto sugerido do backend
+    const fetchProdutoSugerido = async () => {
+      try {
+        const res = await api.get(
+          `/maquinas/${formData.maquina_id}/produto-sugerido`,
+        );
+        if (
+          res.data &&
+          res.data.produtoSugerido &&
+          res.data.produtoSugerido.id
+        ) {
+          setFormData((prev) => ({
+            ...prev,
+            produto_id: res.data.produtoSugerido.id,
+          }));
+        }
+      } catch {
+        // Silencia erro, não sugere nada
+      }
+    };
+    fetchProdutoSugerido();
+  }, [formData.maquina_id, formData.produto_id]);
+
   // --- FUNÇÕES DE CARREGAMENTO ---
   const carregarDados = async () => {
     try {
       setLoading(true);
-      const [movRes, maqRes, prodRes, lojasRes] = await Promise.all([
-        api.get("/movimentacoes"),
-        api.get("/maquinas"),
-        api.get("/produtos"),
-        api.get("/lojas"),
-      ]);
+      const [movRes, maqRes, prodRes, lojasRes, veiculosRes] =
+        await Promise.all([
+          api.get("/movimentacoes"),
+          api.get("/maquinas"),
+          api.get("/produtos"),
+          api.get("/lojas"),
+          api.get("/veiculos"),
+        ]);
 
       setMovimentacoes(movRes.data || []);
       setMaquinas(maqRes.data || []);
       setProdutos(prodRes.data || []);
       setLojas(lojasRes.data || []);
+      setVeiculos(veiculosRes.data || []);
     } catch (err) {
       console.error("Erro ao carregar dados:", err);
       setError("Erro ao carregar dados iniciais.");
@@ -149,91 +569,9 @@ export function Movimentacoes() {
     } catch (error) {
       console.error(
         "Erro ao carregar movimentações de estoque de loja:",
-        error
+        error,
       );
       setMovimentacoesEstoqueLoja([]);
-    }
-  };
-
-  const carregarEstoqueDepositoDaMaquina = async (maquina) => {
-    const lojaId = maquina?.lojaId || maquina?.loja_id || maquina?.loja?.id;
-    if (!lojaId) return [];
-
-    try {
-      const res = await api.get(`/estoque-lojas/${lojaId}`);
-      return Array.isArray(res.data)
-        ? res.data
-        : res.data?.estoque || res.data?.itens || [];
-    } catch (error) {
-      console.warn("Não foi possível validar estoque do depósito:", error);
-      return [];
-    }
-  };
-
-  const limparFormularioMovimentacao = () => {
-    setFormData({
-      maquina_id: "",
-      produto_id: "",
-      quantidadeAtualMaquina: "",
-      quantidadeAdicionada: "",
-      contadorIn: "",
-      contadorOut: "",
-      quantidade_notas_entrada: "",
-      valor_entrada_maquininha_pix: "",
-      valorEntradaNotas: "",
-      observacao: "",
-      retiradaEstoque: false,
-    });
-    setEstoqueAnterior(0);
-    setFiltroLojaForm("");
-    setShowForm(false);
-  };
-
-  const salvarCadastroMovimentacao = async (data) => {
-    const response = await api.post("/movimentacoes", data);
-
-    console.log("✅ [handleSubmit] Sucesso:", response.data);
-
-    setSuccess("Movimentação registrada com sucesso!");
-    limparFormularioMovimentacao();
-    carregarDados();
-  };
-
-  const salvarMovimentacaoInconsistente = async () => {
-    if (!modalInconsistencia || !justificativaInconsistencia.trim()) return;
-
-    const payload = {
-      ...modalInconsistencia.payload,
-      tipoOcorrencia: TIPO_OCORRENCIA_INCONSISTENCIA,
-      observacoes: montarObservacaoInconsistencia({
-        observacoes: modalInconsistencia.payload.observacoes,
-        justificativa: justificativaInconsistencia,
-        inconsistencias: modalInconsistencia.inconsistencias,
-      }),
-    };
-
-    try {
-      setSalvandoMovimentacao(true);
-      setError("");
-
-      if (modalInconsistencia.modo === "edicao") {
-        await api.put(`/movimentacoes/${editandoMovimentacao.id}`, payload);
-        setSuccess("Movimentação atualizada como inconsistente.");
-        cancelarEdicao();
-        carregarDados();
-      } else {
-        await salvarCadastroMovimentacao(payload);
-      }
-
-      setModalInconsistencia(null);
-      setJustificativaInconsistencia("");
-    } catch (error) {
-      console.error("Erro ao salvar movimentação inconsistente:", error);
-      setError(
-        getBackendErrorMessage(error, "Erro ao salvar movimentação inconsistente"),
-      );
-    } finally {
-      setSalvandoMovimentacao(false);
     }
   };
 
@@ -244,38 +582,213 @@ export function Movimentacoes() {
       ...prev,
       [name]: type === "checkbox" ? checked : value,
     }));
+    // Limpar mensagens de erro/sucesso ao editar
+    if (error) setError("");
+    if (success) setSuccess("");
+  };
+
+  const limparFotoContadores = () => {
+    if (fotoContadoresPreview) {
+      URL.revokeObjectURL(fotoContadoresPreview);
+    }
+    setFotoContadores(null);
+    setFotoContadoresPreview("");
+    setResultadoFotoContadores("");
+  };
+
+  const prepararImagemParaEnvioIa = (file) =>
+    new Promise((resolve, reject) => {
+      const image = new Image();
+      const objectUrl = URL.createObjectURL(file);
+
+      image.onload = () => {
+        const maxSize = 900;
+        const escala = Math.min(1, maxSize / Math.max(image.width, image.height));
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.round(image.width * escala));
+        canvas.height = Math.max(1, Math.round(image.height * escala));
+
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+
+        URL.revokeObjectURL(objectUrl);
+        resolve(canvas.toDataURL("image/jpeg", 0.62));
+      };
+
+      image.onerror = () => {
+        URL.revokeObjectURL(objectUrl);
+        reject(new Error("Nao foi possivel ler a imagem."));
+      };
+
+      image.src = objectUrl;
+    });
+
+  const handleFotoContadores = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (!file.type.startsWith("image/")) {
+      setResultadoFotoContadores("Selecione uma imagem valida.");
+      return;
+    }
+
+    if (fotoContadoresPreview) {
+      URL.revokeObjectURL(fotoContadoresPreview);
+    }
+
+    setFotoContadores(file);
+    setFotoContadoresPreview(URL.createObjectURL(file));
+    setLendoFotoContadores(true);
+    setResultadoFotoContadores("IA lendo os contadores...");
+    setError("");
+    setSuccess("");
+
+    try {
+      const dataUrl = await prepararImagemParaEnvioIa(file);
+      const [meta, imagemBase64] = dataUrl.split(",");
+      const mimeType = meta.match(/^data:(.*);base64$/)?.[1] || "image/jpeg";
+      const tamanhoEstimadoBytes = Math.ceil((imagemBase64.length * 3) / 4);
+
+      if (tamanhoEstimadoBytes > 2 * 1024 * 1024) {
+        setResultadoFotoContadores(
+          "A foto ficou grande demais para enviar. Tente tirar mais perto dos contadores ou com menos area ao redor.",
+        );
+        return;
+      }
+
+      const response = await api.post("/assistente-ia/ler-contadores", {
+        imagemBase64,
+        mimeType,
+      });
+      const { contadorIn, contadorOut, confianca, observacao } = response.data || {};
+
+      if (!contadorIn || !contadorOut || confianca === "baixa") {
+        setResultadoFotoContadores(
+          observacao ||
+            "A IA não teve certeza dos dois contadores. Preencha manualmente ou tire outra foto mais perto e reta.",
+        );
+        return;
+      }
+
+      setFormData((prev) => ({
+        ...prev,
+        contadorIn: String(contadorIn),
+        contadorOut: String(contadorOut),
+        ignoreInOut: false,
+      }));
+      setResultadoFotoContadores(
+        `A IA leu: IN ${contadorIn} e OUT ${contadorOut}. Confira antes de salvar.`,
+      );
+    } catch (err) {
+      console.error("Erro ao ler foto dos contadores com IA:", err);
+      const erroApi = err.response?.data?.message || err.response?.data?.error;
+      const mensagemErro =
+        typeof erroApi === "string"
+          ? erroApi
+          : erroApi
+            ? JSON.stringify(erroApi)
+            : "Nao foi possivel ler a foto com IA. Preencha manualmente ou tente novamente.";
+      setResultadoFotoContadores(mensagemErro);
+    } finally {
+      setLendoFotoContadores(false);
+      e.target.value = "";
+    }
+  };
+
+  const obterEstoqueDisponivelProdutoLoja = async (lojaId, produtoId) => {
+    if (!lojaId || !produtoId) return 0;
+
+    try {
+      const response = await api.get(`/estoque-lojas/${lojaId}`);
+      const itensEstoque = response.data || [];
+      const estoqueProduto = itensEstoque.find(
+        (item) =>
+          item.produtoId === produtoId || item.produto?.id === produtoId,
+      );
+
+      return Number(estoqueProduto?.quantidade || 0);
+    } catch (err) {
+      console.error("Erro ao consultar estoque da loja:", err);
+      throw new Error("Não foi possível validar o estoque da loja.");
+    }
   };
 
   // --- CORREÇÃO AQUI: Função handleSubmit recriada com o TRY ---
-  const handleSubmit = async (e) => {
+  const handleSubmit = (e) => {
     e.preventDefault();
+
+    if (divergenciaMachinePaySuspeita && !confirmacaoDivergenciaMachinePay) {
+      setError(
+        `O valor esperado pela ${nomeFontePagamento(sugestaoTotalPreMachinePay?.fonte)} é diferente do que foi digitado. Reconte a máquina, ou marque a confirmação de que já recontou e o valor está correto.`,
+      );
+      return;
+    }
+
+    if (contadorInSuspeito && !confirmacaoContadorIn) {
+      setError(
+        "A diferença do Contador IN em relação ao último registro é muito grande (provável erro de leitura). Marque a confirmação de que o valor está correto antes de registrar.",
+      );
+      return;
+    }
+
+    if (contadorOutSuspeito && !confirmacaoContadorOut) {
+      setError(
+        "A diferença do Contador OUT em relação ao último registro é muito grande (provável erro de leitura). Marque a confirmação de que o valor está correto antes de registrar.",
+      );
+      return;
+    }
+
+    setMostrarConfirmacaoMovimentacao(true);
+  };
+
+  const confirmarRegistroMovimentacao = async () => {
+    if (movimentacaoEmEnvioRef.current) {
+      return;
+    }
+
+    // Precisa ser aberta aqui, de forma síncrona, para não ser bloqueada
+    // pelo Safari/iOS quando o envio ao WhatsApp acontecer mais tarde.
+    const janelaWhatsapp = abrirJanelaWhatsapp();
+    let janelaWhatsappUsada = false;
+
+    movimentacaoEmEnvioRef.current = true;
     setSalvandoMovimentacao(true);
     setError("");
     setSuccess("");
 
     try {
-      // Validar campos obrigatórios
-      if (!formData.maquina_id) {
-        setError("❌ Selecione uma máquina");
-        setSalvandoMovimentacao(false);
-        return;
+      const quantidadeAdicionada = parseInt(formData.quantidadeAdicionada) || 0;
+
+      if (quantidadeAdicionada > 0) {
+        const estoqueDisponivel = await obterEstoqueDisponivelProdutoLoja(
+          filtroLojaForm,
+          formData.produto_id,
+        );
+
+        if (quantidadeAdicionada > estoqueDisponivel) {
+          const produtoSelecionado = produtos.find(
+            (p) => p.id === formData.produto_id,
+          );
+          setError(
+            `Não há estoque suficiente na loja para abastecer ${produtoSelecionado?.nome || "este produto"}. Disponível: ${estoqueDisponivel}, solicitado: ${quantidadeAdicionada}.`,
+          );
+          return;
+        }
       }
-      if (!formData.produto_id) {
-        setError("❌ Selecione um produto");
-        setSalvandoMovimentacao(false);
-        return;
-      }
+
+      setSalvandoMovimentacao(true);
 
       // Converter valores do formulário
       const totalPre = parseInt(formData.quantidadeAtualMaquina) || 0; // valor digitado pelo usuário
-      const quantidadeAdicionada = parseInt(formData.quantidadeAdicionada) || 0;
+      const fichas = parseInt(formData.fichas) || 0;
 
-      // totalPos = totalPre + abastecidas
-      const totalPos = totalPre + quantidadeAdicionada;
+      // totalPos = totalPre + abastecidas - retiradaProduto
+      const retiradaProduto = parseInt(formData.retiradaProduto) || 0;
+      const totalPos = totalPre + quantidadeAdicionada - retiradaProduto;
 
       // Buscar a última movimentação da máquina selecionada para pegar o totalPos anterior
       let ultimoTotalPos = 0;
-      const movimentacoesMaquina = movimentacoes
+      let movimentacoesMaquina = movimentacoes
         .filter((m) => {
           // Considera tanto maquinaId quanto maquina_id
           return (
@@ -293,6 +806,7 @@ export function Movimentacoes() {
       }
 
       // sairam = totalPos da movimentação anterior - totalPre da atual
+      // retiradaProduto NÃO conta em quantidadeSaiu nem no financeiro
       const quantidadeSaiu = Math.max(0, ultimoTotalPos - totalPre);
 
       console.log("📊 [handleSubmit] Cálculos da movimentação:");
@@ -300,7 +814,7 @@ export function Movimentacoes() {
       console.log("   📌 Quantidade atual informada (totalPre):", totalPre);
       console.log(
         "   📌 Quantidade adicionada (abastecidas):",
-        quantidadeAdicionada
+        quantidadeAdicionada,
       );
       console.log("   📌 Calculado que saiu (sairam):", quantidadeSaiu);
       console.log("   📌 Novo total (totalPos):", totalPos);
@@ -321,6 +835,7 @@ export function Movimentacoes() {
         sairam: quantidadeSaiu,
         abastecidas: quantidadeAdicionada,
         totalPos: totalPos,
+        fichas: fichas,
         contadorIn: parseInt(formData.contadorIn) || null,
         contadorOut: parseInt(formData.contadorOut) || null,
         quantidade_notas_entrada: formData.quantidade_notas_entrada
@@ -329,58 +844,173 @@ export function Movimentacoes() {
         valor_entrada_maquininha_pix: formData.valor_entrada_maquininha_pix
           ? parseFloat(formData.valor_entrada_maquininha_pix)
           : null,
-        valorEntradaNotas: formData.valorEntradaNotas
-          ? parseFloat(formData.valorEntradaNotas)
-          : null,
         retiradaEstoque: formData.retiradaEstoque,
         contadorMaquina: null,
         observacoes: observacaoFinal || null,
+        origemTotalPre: sugestaoTotalPreMachinePay?.sugestaoDisponivel
+          ? sugestaoTotalPreMachinePay.modo === "auto"
+            ? "automatico"
+            : "manual"
+          : null,
         produtos: [
           {
             produtoId: formData.produto_id,
             quantidadeSaiu: quantidadeSaiu,
             quantidadeAbastecida: quantidadeAdicionada,
+            retiradaProduto: retiradaProduto,
+            // Transformar para o formato do backend (atualizado)
           },
         ],
       };
 
-      console.log(
-        "📤 [handleSubmit] Dados enviados:",
-        JSON.stringify(data, null, 2)
-      );
-      console.log("🔍 [VALIDAÇÃO] Campos obrigatórios:");
-      console.log("   maquinaId:", data.maquinaId, "- Tipo:", typeof data.maquinaId);
-      console.log("   totalPre:", data.totalPre, "- Tipo:", typeof data.totalPre);
-      console.log("   sairam:", data.sairam, "- Tipo:", typeof data.sairam);
-      console.log("   abastecidas:", data.abastecidas, "- Tipo:", typeof data.abastecidas);
+      await api.post("/movimentacoes", data);
 
-      const maquina = maquinas.find((m) => m.id === formData.maquina_id);
-      const estoqueDeposito = await carregarEstoqueDepositoDaMaquina(maquina);
-      const inconsistencias = validarInconsistenciasMovimentacao({
-        movimentacao: data,
-        maquina,
-        estoqueDeposito,
-      });
-
-      if (inconsistencias.length > 0) {
-        setModalInconsistencia({
-          modo: "cadastro",
-          payload: data,
-          inconsistencias,
-        });
-        setJustificativaInconsistencia("");
-        return;
+      // Conferência manual (a cada 15 dias) confirmada mesmo com divergência
+      // em relação ao esperado pela Machine Pay: avisa o admin com os
+      // números pra ele investigar (erro de contagem, pulso perdido, etc).
+      if (divergenciaMachinePaySuspeita && confirmacaoDivergenciaMachinePay) {
+        try {
+          const esperado = sugestaoTotalPreMachinePay.sugestaoTotalPre;
+          const diferenca = totalPre - esperado;
+          await api.post("/alertas-movimentacao", {
+            maquinaId: formData.maquina_id,
+            observacao:
+              `Divergência na conferência manual da ${nomeFontePagamento(sugestaoTotalPreMachinePay.fonte)}: era pra ter ${esperado} ` +
+              `(calculado com base em R$ ${sugestaoTotalPreMachinePay.totalRecebidoDesdeUltimaMovimentacao.toFixed(2)} ` +
+              `recebidos na ${nomeFontePagamento(sugestaoTotalPreMachinePay.fonte)} desde a movimentação anterior ÷ R$ ${Number(sugestaoTotalPreMachinePay.valorDesconto).toFixed(2)} por pulso ` +
+              `= ${sugestaoTotalPreMachinePay.pulsos} pulso(s)), mas o operador registrou ${totalPre} ` +
+              `mesmo após o aviso de recontagem. Diferença: ${diferenca > 0 ? "+" : ""}${diferenca}.`,
+            dadosAbastecimento: {
+              esperado,
+              informado: totalPre,
+              diferenca,
+              totalRecebidoMachinePay:
+                sugestaoTotalPreMachinePay.totalRecebidoDesdeUltimaMovimentacao,
+              pulsos: sugestaoTotalPreMachinePay.pulsos,
+              valorDesconto: sugestaoTotalPreMachinePay.valorDesconto,
+            },
+          });
+        } catch (erroAlertaDivergencia) {
+          console.error(
+            "Erro ao registrar alerta de divergência da Machine Pay:",
+            erroAlertaDivergencia,
+          );
+        }
       }
 
-      await salvarCadastroMovimentacao(data);
+      if (alertaOrigemId) {
+        try {
+          await api.patch(`/alertas-movimentacao/${alertaOrigemId}/resolver`);
+        } catch (erroResolverAlerta) {
+          console.error(
+            "Erro ao resolver alerta de movimentação de origem:",
+            erroResolverAlerta,
+          );
+        }
+        setAlertaOrigemId(null);
+      }
+
+      // Movimentação registrada com sucesso: envia automaticamente para o WhatsApp
+      await enviarParaWhatsapp(janelaWhatsapp);
+      janelaWhatsappUsada = true;
+      resetFluxoWhatsappBypass();
+
+      // Devolver retirada para o estoque da loja, se marcado
+      if (
+        formData.retiradaProdutoDevolverEstoque &&
+        retiradaProduto > 0 &&
+        formData.produto_id &&
+        formData.maquina_id
+      ) {
+        // Encontrar a loja da máquina selecionada
+        const maquinaSelecionada = maquinas.find(
+          (m) => m.id === formData.maquina_id,
+        );
+        const lojaId = maquinaSelecionada ? maquinaSelecionada.lojaId : null;
+        if (lojaId) {
+          await api.post("/movimentacao-estoque-loja", {
+            lojaId,
+            produtos: [
+              {
+                produtoId: formData.produto_id,
+                quantidade: retiradaProduto,
+                tipoMovimentacao: "entrada",
+              },
+            ],
+            usuarioId: usuario.id,
+            observacao:
+              "Devolução automática de retirada de produto da máquina",
+          });
+        }
+      }
+
+      // Logs para depuração do filtro
+      console.log("Todas movimentações:", movimentacoes);
+      console.log(
+        "ID da máquina selecionada:",
+        formData.maquina_id,
+        "(tipo:",
+        typeof formData.maquina_id,
+        ")",
+      );
+      movimentacoesMaquina = movimentacoes
+        .filter((m) => {
+          const id1 = m.maquinaId !== undefined ? m.maquinaId : m.maquina_id;
+          console.log(
+            "Comparando:",
+            id1,
+            "(tipo:",
+            typeof id1,
+            ") com",
+            formData.retiradaProdutoDevolverEstoque === true,
+            "(tipo:",
+            typeof formData.maquina_id,
+            ")",
+          );
+          return id1 === formData.maquina_id;
+        })
+        .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+      console.log("Movimentações filtradas:", movimentacoesMaquina);
+      ultimoTotalPos = 0;
+      if (movimentacoesMaquina.length > 0) {
+        ultimoTotalPos = movimentacoesMaquina[0].totalPos || 0;
+      }
+      console.log("Último totalPos encontrado:", ultimoTotalPos);
+
+      setFormData({
+        maquina_id: "",
+        produto_id: "",
+        quantidadeAtualMaquina: "",
+        quantidadeAdicionada: "",
+        fichas: "",
+        contadorIn: "",
+        contadorOut: "",
+        quantidade_notas_entrada: "",
+        valor_entrada_maquininha_pix: "",
+        observacao: "",
+        retiradaEstoque: false,
+        retiradaProduto: 0,
+        ignoreInOut: false,
+      });
+      limparFotoContadores();
+      setEstoqueAnterior(0);
+      setFiltroLojaForm("");
+      setShowForm(false);
+
+      // Recarregar dados
+      carregarDados();
     } catch (error) {
       console.error("❌ [handleSubmit] Erro:", error);
       setError(
         error.response?.data?.error ||
           error.response?.data?.message ||
-          "Erro ao registrar movimentação"
+          "Erro ao registrar movimentação",
       );
     } finally {
+      if (janelaWhatsapp && !janelaWhatsappUsada && !janelaWhatsapp.closed) {
+        janelaWhatsapp.close();
+      }
+      movimentacaoEmEnvioRef.current = false;
       setSalvandoMovimentacao(false);
     }
   };
@@ -388,31 +1018,28 @@ export function Movimentacoes() {
   const iniciarEdicao = (movimentacao) => {
     setEditandoMovimentacao(movimentacao);
     setFormEdicao({
+      fichas: movimentacao.fichas || 0,
       abastecidas: movimentacao.abastecidas || 0,
       quantidade_notas_entrada: movimentacao.quantidade_notas_entrada || "",
       valor_entrada_maquininha_pix:
         movimentacao.valor_entrada_maquininha_pix || "",
-      valorEntradaNotas: movimentacao.valorEntradaNotas || "",
-      dataColeta: toDatetimeLocalValue(
-        movimentacao.dataColeta || movimentacao.createdAt
-      ),
     });
   };
 
   const cancelarEdicao = () => {
     setEditandoMovimentacao(null);
     setFormEdicao({
+      fichas: "",
       abastecidas: "",
       quantidade_notas_entrada: "",
       valor_entrada_maquininha_pix: "",
-      valorEntradaNotas: "",
-      dataColeta: "",
     });
   };
 
   const salvarEdicao = async () => {
     try {
-      const payload = {
+      await api.put(`/movimentacoes/${editandoMovimentacao.id}`, {
+        fichas: parseInt(formEdicao.fichas) || 0,
         abastecidas: parseInt(formEdicao.abastecidas) || 0,
         quantidade_notas_entrada:
           formEdicao.quantidade_notas_entrada !== ""
@@ -422,41 +1049,13 @@ export function Movimentacoes() {
           formEdicao.valor_entrada_maquininha_pix !== ""
             ? parseFloat(formEdicao.valor_entrada_maquininha_pix)
             : null,
-        valorEntradaNotas:
-          formEdicao.valorEntradaNotas !== ""
-            ? parseFloat(formEdicao.valorEntradaNotas)
-            : null,
-        dataColeta: toBackendDatetimeValue(formEdicao.dataColeta),
-      };
-
-      const maquina = maquinas.find((m) => m.id === editandoMovimentacao.maquinaId);
-      const estoqueDeposito = await carregarEstoqueDepositoDaMaquina(maquina);
-      const inconsistencias = validarInconsistenciasMovimentacao({
-        movimentacao: {
-          ...editandoMovimentacao,
-          ...payload,
-        },
-        maquina,
-        estoqueDeposito,
       });
-
-      if (inconsistencias.length > 0) {
-        setModalInconsistencia({
-          modo: "edicao",
-          payload,
-          inconsistencias,
-        });
-        setJustificativaInconsistencia("");
-        return;
-      }
-
-      await api.put(`/movimentacoes/${editandoMovimentacao.id}`, payload);
       setSuccess("Movimentação atualizada com sucesso!");
       cancelarEdicao();
       carregarDados();
     } catch (error) {
       console.error("Erro ao atualizar:", error);
-      setError(getBackendErrorMessage(error, "Erro ao atualizar movimentação"));
+      setError("Erro ao atualizar movimentação");
     }
   };
   const confirmarExclusaoLoja = async () => {
@@ -500,12 +1099,215 @@ export function Movimentacoes() {
     }
   };
 
+  // --- WHATSAPP ---
+  const enviarParaWhatsapp = async (janelaPreAberta = null) => {
+    const loja = lojas.find((l) => l.id === filtroLojaForm);
+    const maquina = maquinas.find((m) => m.id === formData.maquina_id);
+    const produto = produtos.find((p) => p.id === formData.produto_id);
+    const capacidadeMaquina =
+      maquina?.capacidadePadrao ?? maquina?.capacidade ?? null;
+
+    const totalPre = parseInt(formData.quantidadeAtualMaquina) || 0;
+    const quantidadeAdicionada = parseInt(formData.quantidadeAdicionada) || 0;
+    const retiradaProduto = parseInt(formData.retiradaProduto) || 0;
+    const totalPos = totalPre + quantidadeAdicionada - retiradaProduto;
+
+    let mensagem = ` *Movimentação de Máquina*\n`;
+    mensagem += `━━━━━━━━━━━━━━━━━━━━\n\n`;
+    mensagem += `->  *Loja:* ${loja?.nome || "Não informada"}\n`;
+    mensagem += `->  *Máquina:* ${maquina ? `${maquina.nome} - ${maquina.codigo}` : "Não informada"}\n`;
+    mensagem += `->  *Produto:* ${produto ? `${produto.emoji || ""} ${produto.nome}` : "Não informado"}\n`;
+    mensagem += `->  *Capacidade da máquina:* ${capacidadeMaquina ?? "Não informada"}\n`;
+
+    if (!formData.ignoreInOut) {
+      mensagem += `\n━━━━━━━━━━━━━━━━━━━━\n`;
+      mensagem += `->  *Contador IN:* ${formData.contadorIn || "0"}\n`;
+      mensagem += `->  *Contador OUT:* ${formData.contadorOut || "0"}\n`;
+    }
+
+    mensagem += `\n━━━━━━━━━━━━━━━━━━━━\n`;
+    mensagem += `->  *Quantidade atual na máquina:* ${totalPre}\n`;
+    mensagem += `->  *Quantidade adicionada:* ${quantidadeAdicionada}\n`;
+    mensagem += `->  *Total após abastecimento:* ${totalPos}\n`;
+    mensagem += `->  *Fichas:* ${formData.fichas || "0"}\n`;
+
+    if (retiradaProduto > 0) {
+      mensagem += `\n━━━━━━━━━━━━━━━━━━━━\n`;
+      mensagem += `->  *Retirada de produto:* ${retiradaProduto}\n`;
+      mensagem += `->  *Devolvido ao estoque:* ${formData.retiradaProdutoDevolverEstoque ? "Sim ✅" : "Não ❌"}\n`;
+    }
+
+    if (formData.retiradaEstoque) {
+      mensagem += `\n━━━━━━━━━━━━━━━━━━━━\n`;
+      mensagem += `-> *Retirada de estoque (não é venda)*\n`;
+    }
+
+    if (formData.observacao?.trim()) {
+      mensagem += `\n━━━━━━━━━━━━━━━━━━━━\n`;
+      mensagem += `->  *Observação:* ${formData.observacao.trim()}\n`;
+    }
+
+    if (fotoContadores) {
+      mensagem += `\n->  *Foto dos contadores:* anexada nesta mensagem\n`;
+    }
+
+    localStorage.setItem(CHAVE_ULTIMA_MENSAGEM_WHATSAPP, mensagem);
+    setTemMensagemSalva(true);
+    try {
+      if (fotoContadores) {
+        await salvarFotoUltimaMovimentacao(fotoContadores);
+      } else {
+        await limparFotoUltimaMovimentacao();
+      }
+    } catch (err) {
+      console.error("Erro ao salvar foto da última movimentação:", err);
+    }
+
+    if (
+      fotoContadores &&
+      navigator.canShare &&
+      navigator.share &&
+      navigator.canShare({ files: [fotoContadores] })
+    ) {
+      try {
+        await navigator.share({
+          title: "Movimentacao de Maquina",
+          text: mensagem,
+          files: [fotoContadores],
+        });
+        if (janelaPreAberta && !janelaPreAberta.closed) janelaPreAberta.close();
+        return;
+      } catch (err) {
+        if (err?.name === "AbortError") {
+          if (janelaPreAberta && !janelaPreAberta.closed) janelaPreAberta.close();
+          return;
+        }
+        console.error("Erro ao compartilhar foto no WhatsApp:", err);
+      }
+    }
+
+    if (fotoContadores) {
+      setError(
+        "Este navegador nao permite anexar a foto automaticamente pelo WhatsApp. O texto foi aberto; anexe a foto manualmente na conversa.",
+      );
+    }
+
+    const url = `https://api.whatsapp.com/send?text=${encodeURIComponent(mensagem)}`;
+    navegarParaWhatsapp(janelaPreAberta, url);
+  };
+
+  const enviarUltimaMensagemSalva = async () => {
+    const janelaPreAberta = abrirJanelaWhatsapp();
+
+    const mensagem = localStorage.getItem(CHAVE_ULTIMA_MENSAGEM_WHATSAPP);
+    if (!mensagem) {
+      if (janelaPreAberta && !janelaPreAberta.closed) janelaPreAberta.close();
+      setError("Nenhuma mensagem de movimentação salva para reenviar.");
+      return;
+    }
+
+    const foto = await obterFotoUltimaMovimentacao().catch((err) => {
+      console.error("Erro ao ler foto salva da última movimentação:", err);
+      return null;
+    });
+
+    if (
+      foto &&
+      navigator.canShare &&
+      navigator.share &&
+      navigator.canShare({ files: [foto] })
+    ) {
+      try {
+        await navigator.share({
+          title: "Movimentacao de Maquina",
+          text: mensagem,
+          files: [foto],
+        });
+        if (janelaPreAberta && !janelaPreAberta.closed) janelaPreAberta.close();
+        return;
+      } catch (err) {
+        if (err?.name === "AbortError") {
+          if (janelaPreAberta && !janelaPreAberta.closed) janelaPreAberta.close();
+          return;
+        }
+        console.error("Erro ao compartilhar foto salva no WhatsApp:", err);
+      }
+    }
+
+    if (foto) {
+      setError(
+        "Este navegador não permite anexar a foto automaticamente pelo WhatsApp. O texto foi aberto; anexe a foto manualmente na conversa.",
+      );
+    }
+
+    const url = `https://api.whatsapp.com/send?text=${encodeURIComponent(mensagem)}`;
+    navegarParaWhatsapp(janelaPreAberta, url);
+  };
+
+  const resetFluxoWhatsappBypass = () => {
+    setNaoVaiRegistrar(false);
+    setMostrarObsAlerta(false);
+    setObsAlerta("");
+  };
+
+  const handleClickEnviarWhatsapp = () => {
+    if (!naoVaiRegistrar) return;
+    if (!formData.maquina_id) {
+      setError("Selecione a máquina antes de enviar para o WhatsApp.");
+      return;
+    }
+    setMostrarObsAlerta(true);
+  };
+
+  const confirmarEnvioBypassWhatsapp = async () => {
+    if (!obsAlerta.trim() || enviandoAlerta) return;
+
+    // Precisa ser aberta aqui, de forma síncrona, para não ser bloqueada
+    // pelo Safari/iOS quando o envio ao WhatsApp acontecer mais tarde.
+    const janelaWhatsapp = abrirJanelaWhatsapp();
+    let janelaWhatsappUsada = false;
+
+    setEnviandoAlerta(true);
+    setError("");
+    try {
+      await api.post("/alertas-movimentacao", {
+        maquinaId: formData.maquina_id,
+        observacao: obsAlerta.trim(),
+        dadosAbastecimento: {
+          produtoId: formData.produto_id || null,
+          quantidadeAtualMaquina: formData.quantidadeAtualMaquina || null,
+          quantidadeAdicionada: formData.quantidadeAdicionada || null,
+          fichas: formData.fichas || null,
+          contadorIn: formData.contadorIn || null,
+          contadorOut: formData.contadorOut || null,
+          quantidade_notas_entrada: formData.quantidade_notas_entrada || null,
+          valor_entrada_maquininha_pix:
+            formData.valor_entrada_maquininha_pix || null,
+        },
+      });
+      await enviarParaWhatsapp(janelaWhatsapp);
+      janelaWhatsappUsada = true;
+      resetFluxoWhatsappBypass();
+    } catch (err) {
+      console.error("Erro ao registrar alerta de movimentação:", err);
+      setError(
+        err?.response?.data?.error ||
+          "Não foi possível registrar o alerta. O WhatsApp não foi aberto.",
+      );
+    } finally {
+      if (janelaWhatsapp && !janelaWhatsappUsada && !janelaWhatsapp.closed) {
+        janelaWhatsapp.close();
+      }
+      setEnviandoAlerta(false);
+    }
+  };
+
   // --- CÁLCULOS DE ESTATÍSTICAS ---
   const entradas = movimentacoes.filter((m) => m.abastecidas > 0);
   const saidas = movimentacoes.filter((m) => m.sairam > 0);
   const totalEntradas = entradas.reduce(
     (sum, m) => sum + (m.abastecidas || 0),
-    0
+    0,
   );
   const totalSaidas = saidas.reduce((sum, m) => sum + (m.sairam || 0), 0);
 
@@ -651,11 +1453,12 @@ export function Movimentacoes() {
       ),
     },
     {
-      // Removido campo de moedas
+      key: "fichas",
+      label: "Fichas",
       render: (mov) => (
         <div className="flex items-center gap-1">
           <span className="text-lg">🎫</span>
-          {/* Removido campo de moedas */}
+          <span className="font-semibold text-blue-600">{mov.fichas || 0}</span>
         </div>
       ),
     },
@@ -667,41 +1470,6 @@ export function Movimentacoes() {
       ),
     },
   ];
-
-
-  // --- ROTEIROS BOLINHA ---
-  const [bolinhaRoteiros, setBolinhaRoteiros] = useState([]);
-
-  // Carregar roteiros bolinha do backend (filtrar por zona)
-  useEffect(() => {
-    const fetchBolinha = async () => {
-      try {
-        const res = await api.get("/roteiros");
-        // Filtra roteiros cuja zona começa com 'Bolinha'
-        const bolinhas = (res.data || []).filter(r => (r.zona || "").toLowerCase().startsWith("bolinha"));
-        setBolinhaRoteiros(bolinhas.map(r => ({ ...r, editando: false })));
-      } catch (err) {
-        setBolinhaRoteiros([]);
-      }
-    };
-    fetchBolinha();
-  }, []);
-
-  // Editar nome do roteiro bolinha (apenas frontend, ajuste para persistir se backend permitir)
-  const handleEditBolinhaNome = (id, nome) => {
-    setBolinhaRoteiros(prev => prev.map(r => r.id === id ? { ...r, nome, editando: false } : r));
-    // TODO: Se backend permitir edição, faça um PUT aqui
-  };
-  const handleStartEditBolinha = (id) => {
-    setBolinhaRoteiros(prev => prev.map(r => r.id === id ? { ...r, editando: true } : r));
-  };
-  const handleZoneChangeBolinha = (id, zona) => {
-    setBolinhaRoteiros(prev => prev.map(r => r.id === id ? { ...r, zona } : r));
-    // TODO: Se backend permitir edição, faça um PUT aqui
-  };
-
-  // Filtragem por zona/nome (mantém apenas se necessário)
-  const bolinhaFiltrados = bolinhaRoteiros;
 
   if (usuario?.role === "ADMIN") {
     columns.push({
@@ -733,20 +1501,252 @@ export function Movimentacoes() {
 
   if (loading) return <PageLoader />;
 
+  const contadorInAtualNum = parseInt(formData.contadorIn);
+  const diferencaContadorIn =
+    !formData.ignoreInOut &&
+    !isNaN(contadorInAtualNum) &&
+    ultimoContadorMaquina.contadorIn !== null
+      ? Math.abs(contadorInAtualNum - ultimoContadorMaquina.contadorIn)
+      : 0;
+  const contadorInSuspeito = diferencaContadorIn > LIMITE_DIFERENCA_CONTADOR_IN;
+
+  const contadorOutAtualNum = parseInt(formData.contadorOut);
+  const diferencaContadorOut =
+    !formData.ignoreInOut &&
+    !isNaN(contadorOutAtualNum) &&
+    ultimoContadorMaquina.contadorOut !== null
+      ? Math.abs(contadorOutAtualNum - ultimoContadorMaquina.contadorOut)
+      : 0;
+  const contadorOutSuspeito =
+    diferencaContadorOut > LIMITE_DIFERENCA_CONTADOR_OUT;
+
+  // O valor calculado pela Machine Pay (modo "auto" ou "forcar_manual") não
+  // trava o campo: o operador pode sempre ajustar. Mas se o que ele digitou
+  // não bater com o valor esperado, pede recontagem e confirmação explícita.
+  const totalPreDigitadoNum = parseInt(formData.quantidadeAtualMaquina);
+  const divergenciaMachinePaySuspeita =
+    sugestaoTotalPreMachinePay?.sugestaoDisponivel &&
+    (sugestaoTotalPreMachinePay?.modo === "forcar_manual" ||
+      sugestaoTotalPreMachinePay?.modo === "auto") &&
+    !isNaN(totalPreDigitadoNum) &&
+    totalPreDigitadoNum !== sugestaoTotalPreMachinePay.sugestaoTotalPre;
+
+  const lojaSelecionadaNoForm = lojas.find(
+    (l) => String(l.id) === String(filtroLojaForm),
+  );
+  const maquinaSelecionadaNoForm = maquinas.find(
+    (m) => String(m.id) === String(formData.maquina_id),
+  );
+  const produtoSelecionadoNoForm = produtos.find(
+    (p) => String(p.id) === String(formData.produto_id),
+  );
+  const quantidadeAdicionadaNoForm =
+    parseInt(formData.quantidadeAdicionada) || 0;
+  const retiradaProdutoNoForm = parseInt(formData.retiradaProduto) || 0;
+
+  const resumoConfirmacaoMovimentacao = (
+    <>
+      <span className="block">
+        <strong>Loja:</strong> {lojaSelecionadaNoForm?.nome || "-"}
+      </span>
+      <span className="block">
+        <strong>Máquina:</strong>{" "}
+        {maquinaSelecionadaNoForm
+          ? `${maquinaSelecionadaNoForm.nome} - ${maquinaSelecionadaNoForm.codigo}`
+          : "-"}
+      </span>
+      <span className="block">
+        <strong>Produto:</strong> {produtoSelecionadoNoForm?.nome || "-"}
+      </span>
+      {!formData.ignoreInOut && (
+        <>
+          <span className="block">
+            <strong>Contador IN:</strong> {formData.contadorIn || "0"}
+          </span>
+          <span className="block">
+            <strong>Contador OUT:</strong> {formData.contadorOut || "0"}
+          </span>
+        </>
+      )}
+      <span className="block">
+        <strong>Fichas coletadas:</strong> {formData.fichas || "0"}
+      </span>
+      <span className="block">
+        <strong>Quantidade atual na máquina:</strong>{" "}
+        {formData.quantidadeAtualMaquina || "0"}
+      </span>
+      <span className="block font-bold text-green-700">
+        <strong>Quantidade abastecida:</strong> {quantidadeAdicionadaNoForm}
+      </span>
+      {retiradaProdutoNoForm > 0 && (
+        <span className="block">
+          <strong>Retirada de produto:</strong> {retiradaProdutoNoForm}
+        </span>
+      )}
+    </>
+  );
+
   return (
     <div className="min-h-screen bg-background-light bg-pattern teddy-pattern">
       <Navbar />
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        <PageHeader
-          title="Movimentações"
-          subtitle="Registre entradas e saídas de produtos nas máquinas"
-          icon="🔄"
-          action={{
-            label: showForm ? "Cancelar" : "Nova Movimentação",
-            onClick: () => setShowForm(!showForm),
-          }}
-        />
+        {/* Header com dois botões lado a lado */}
+        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-6">
+          <PageHeader
+            title="Movimentações"
+            subtitle="Registre entradas e saídas de produtos nas máquinas"
+            icon="🔄"
+            action={null}
+          />
+          <div className="flex flex-wrap gap-3">
+            <button
+              className="px-6 py-2 bg-yellow-500 text-white rounded hover:bg-yellow-600 font-bold shadow text-base"
+              onClick={() => {
+                setShowForm((v) => !v);
+                setAlertaOrigemId(null);
+              }}
+            >
+              {showForm ? "Cancelar" : "Nova Movimentação"}
+            </button>
+            <button
+              className="px-6 py-2 bg-rose-600 text-white rounded hover:bg-rose-700 font-bold shadow text-base"
+              onClick={() => navigate("/sangrias")}
+            >
+              Sangria
+            </button>
+            {usuario?.role !== "FUNCIONARIO" && (
+              <button
+                className="px-6 py-2 bg-blue-700 text-white rounded hover:bg-blue-800 font-bold shadow text-base"
+                onClick={() => setModalRegistrarDinheiro(true)}
+              >
+                Registrar Dinheiro
+              </button>
+            )}
+            <button
+              className="px-6 py-2 bg-emerald-600 text-white rounded hover:bg-emerald-700 font-bold shadow text-base"
+              onClick={() => setModalGastoVariavel(true)}
+            >
+              Lançar Gasto Variável
+            </button>
+            <button
+              className="px-6 py-2 bg-gray-700 text-white rounded hover:bg-gray-800 font-bold shadow text-base disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-gray-700"
+              onClick={enviarUltimaMensagemSalva}
+              disabled={!temMensagemSalva}
+              title={
+                temMensagemSalva
+                  ? "Reenviar a mensagem da última movimentação lançada"
+                  : "Nenhuma mensagem salva ainda"
+              }
+            >
+              Enviar Última Mensagem
+            </button>
+          </div>
+        </div>
+
+        {/* Modal Lançar Gasto Variável */}
+        {modalGastoVariavel && (
+          <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+            <div className="bg-white rounded-lg p-6 shadow-lg relative">
+              <button
+                onClick={() => setModalGastoVariavel(false)}
+                style={{
+                  position: "absolute",
+                  top: 12,
+                  right: 16,
+                  fontSize: 22,
+                  background: "none",
+                  border: "none",
+                  cursor: "pointer",
+                  color: "#888",
+                }}
+                aria-label="Fechar"
+              >
+                ×
+              </button>
+              <LancarGastoVariavel
+                lojas={lojas}
+                veiculos={veiculos}
+                onClose={() => setModalGastoVariavel(false)}
+                onSuccess={() => {
+                  setSuccess("Gasto variável lançado com sucesso!");
+                  carregarDados();
+                }}
+              />
+            </div>
+          </div>
+        )}
+        {/* Modal Registrar Dinheiro */}
+        {modalRegistrarDinheiro && (
+          <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
+            <div
+              className="bg-white rounded-lg p-6 shadow-lg relative"
+              style={{ minWidth: 520 }}
+            >
+              <button
+                onClick={() => setModalRegistrarDinheiro(false)}
+                style={{
+                  position: "absolute",
+                  top: 12,
+                  right: 16,
+                  fontSize: 22,
+                  background: "none",
+                  border: "none",
+                  cursor: "pointer",
+                  color: "#888",
+                }}
+                aria-label="Fechar"
+              >
+                ×
+              </button>
+              <RegistrarDinheiro
+                lojas={lojas}
+                maquinas={maquinas}
+                onSubmit={async (data) => {
+                  try {
+                    setError("");
+                    setSuccess("");
+                    const response = await api.post("/registro-dinheiro", data);
+                    // Máquina com os dois IDs fecha nos dois sistemas;
+                    // junta as mensagens de cada um.
+                    const mensagemFechamento = (fechamento, nome) => {
+                      if (!fechamento?.executado) return null;
+                      if (fechamento.concluido) {
+                        return fechamento.jaExistia
+                          ? `esse período já estava fechado na ${nome}`
+                          : `fechamento concluído na ${nome}`;
+                      }
+                      return `a ${nome} não confirmou o fechamento${
+                        fechamento.erro ? ` (${fechamento.erro})` : ""
+                      }`;
+                    };
+                    const mensagens = [
+                      mensagemFechamento(
+                        response.data?.fechamentoMachinePay,
+                        "Machine Pay",
+                      ),
+                      mensagemFechamento(
+                        response.data?.fechamentoCompactPay,
+                        "CompactPay",
+                      ),
+                    ].filter(Boolean);
+                    setSuccess(
+                      mensagens.length
+                        ? `Registro salvo: ${mensagens.join("; ")}.`
+                        : "Registro de dinheiro salvo com sucesso!",
+                    );
+                    setModalRegistrarDinheiro(false);
+                  } catch (err) {
+                    setError(
+                      err?.response?.data?.error ||
+                        "Erro ao registrar dinheiro.",
+                    );
+                  }
+                }}
+              />
+            </div>
+          </div>
+        )}
 
         {error && (
           <AlertBox type="error" message={error} onClose={() => setError("")} />
@@ -765,32 +1765,40 @@ export function Movimentacoes() {
 
         {/* Filtro por Loja - Apenas para ADMIN */}
         {usuario?.role === "ADMIN" && (
-          <>
-            <div className="card-gradient mb-6">
-              <h3 className="text-lg font-bold text-gray-900 mb-4 flex items-center gap-2">
-                <span className="text-2xl">🔍</span>
-                Filtrar Movimentações
-              </h3>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-2">
-                    🏪 Filtrar por Loja
-                  </label>
-                  <select
-                    value={filtroLojaListagem}
-                    onChange={(e) => setFiltroLojaListagem(e.target.value)}
-                    className="input-field"
-                  >
-                    <option value="">Todas as lojas</option>
-                    {lojas.map((loja) => (
-                      <option key={loja.id} value={loja.id}>
-                        {loja.nome}
-                      </option>
-                    ))}
-                  </select>
-                </div>
+          <div className="card-gradient mb-6">
+            <h3 className="text-lg font-bold text-gray-900 mb-4 flex items-center gap-2">
+              <span className="text-2xl">🔍</span>
+              Filtrar Movimentações
+            </h3>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-2">
+                  🏪 Filtrar por Loja
+                </label>
+                <select
+                  value={filtroLojaListagem}
+                  onChange={(e) => setFiltroLojaListagem(e.target.value)}
+                  className="input-field"
+                >
+                  <option value="">Todas as lojas</option>
+                  {lojas.map((loja) => (
+                    <option key={loja.id} value={loja.id}>
+                      {loja.nome}
+                    </option>
+                  ))}
+                </select>
               </div>
             </div>
+          </div>
+        )}
+
+        {showForm && (
+          <div id="form-nova-movimentacao" className="card-gradient mb-6">
+            <h3 className="text-lg font-bold text-gray-900 mb-4 flex items-center gap-2">
+              <span className="text-2xl">📝</span>
+              Registrar Movimentação
+            </h3>
+
             <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
               <p className="text-sm text-blue-800 flex items-center gap-2">
                 <svg
@@ -809,199 +1817,8 @@ export function Movimentacoes() {
                 informe quantos foram adicionados.
               </p>
             </div>
+
             <form onSubmit={handleSubmit} className="space-y-4">
-              {/* Indicador de Estoque Anterior */}
-              {formData.maquina_id && (
-                <div className="p-4 bg-linear-to-r from-blue-50 to-indigo-50 border-2 border-blue-200 rounded-lg">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-sm font-semibold text-blue-900">
-                        📊 Estoque Anterior da Máquina
-                      </p>
-                      <p className="text-xs text-blue-700 mt-1">
-                        Última contagem registrada no sistema
-                      </p>
-                    </div>
-                    <div className="text-right">
-                      <p className="text-3xl font-bold text-blue-900">
-                        {estoqueAnterior}
-                      </p>
-                      <p className="text-xs text-blue-600">unidades</p>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-2">
-                    📦 Quantidade Atual na Máquina *
-                  </label>
-                  <input
-                    type="number"
-                    name="quantidadeAtualMaquina"
-                    value={formData.quantidadeAtualMaquina}
-                    onChange={handleChange}
-                    className="input-field"
-                    placeholder="0"
-                    min="0"
-                  />
-                  <p className="text-xs text-gray-500 mt-1">
-                    Quantos produtos tem agora
-                  </p>
-                  {formData.quantidadeAtualMaquina && estoqueAnterior > 0 && (
-                    <p className="text-xs font-semibold text-red-600 mt-1">
-                      🔻 Saíram:{" "}
-                      {Math.max(
-                        0,
-                        estoqueAnterior -
-                          parseInt(formData.quantidadeAtualMaquina || 0)
-                      )}{" "}
-                      unidades
-                    </p>
-                  )}
-                </div>
-
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-2">
-                    📥 Quantidade Adicionada
-                  </label>
-                  <input
-                    type="number"
-                    name="quantidadeAdicionada"
-                    value={formData.quantidadeAdicionada}
-                    onChange={handleChange}
-                    className="input-field"
-                    placeholder="0"
-                    min="0"
-                  />
-                  <p className="text-xs text-gray-500 mt-1">
-                    Quantos produtos foram adicionados
-                  </p>
-                  {formData.quantidadeAdicionada &&
-                    formData.quantidadeAtualMaquina && (
-                      <p className="text-xs font-semibold text-green-600 mt-1">
-                        ✅ Novo total:{" "}
-                        {parseInt(formData.quantidadeAtualMaquina || 0) +
-                          parseInt(formData.quantidadeAdicionada || 0)}{" "}
-                        unidades
-                      </p>
-                    )}
-                </div>
-
-
-              </div>
-
-              {/* Valores de Entrada */}
-              <h3 className="text-lg font-bold text-gray-800 mb-3 mt-6">
-                💰 Valores de Entrada (Arrecadação)
-              </h3>
-              <p className="text-xs text-gray-500 mt-1">
-                O dinheiro e o cartão são lançados por ponto na tela Financeiro, não por máquina.
-              </p>
-
-              {/* Campos Antigos - Deprecated */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
-                <div>
-                  <label className="block text-sm font-semibold text-gray-400 mb-2">
-                    ⚠️ Qtd Notas (Campo Antigo - Não usar)
-                  </label>
-                  <input
-                    type="number"
-                    name="quantidade_notas_entrada"
-                    value={formData.quantidade_notas_entrada}
-                    onChange={handleChange}
-                    className="input-field bg-gray-100"
-                    placeholder="0.00"
-                    min="0"
-                    step="0.01"
-                    disabled
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-semibold text-gray-400 mb-2">
-                    ⚠️ Valor Digital (Campo Antigo - Não usar)
-                  </label>
-                  <input
-                    type="number"
-                    name="valor_entrada_maquininha_pix"
-                    value={formData.valor_entrada_maquininha_pix}
-                    onChange={handleChange}
-                    className="input-field bg-gray-100"
-                    placeholder="0.00"
-                    min="0"
-                    step="0.01"
-                    disabled
-                  />
-                </div>
-              </div>
-
-              {/* Contadores da Máquina */}
-              <h3 className="text-lg font-bold text-gray-800 mb-3 mt-6">
-                📊 Contadores da Máquina
-              </h3>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-2">
-                    📥 Contador IN (Entrada)
-                  </label>
-                  <input
-                    type="number"
-                    name="contadorIn"
-                    value={formData.contadorIn}
-                    onChange={handleChange}
-                    className="input-field"
-                    placeholder="0"
-                    min="0"
-                  />
-                  <p className="text-xs text-gray-500 mt-1">
-                    Número do contador IN da máquina
-                  </p>
-                </div>
-
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-2">
-                    📤 Contador OUT (Saída)
-                  </label>
-                  <input
-                    type="number"
-                    name="contadorOut"
-                    value={formData.contadorOut}
-                    onChange={handleChange}
-                    className="input-field"
-                    placeholder="0"
-                    min="0"
-                  />
-                  <p className="text-xs text-gray-500 mt-1">
-                    Número do contador OUT da máquina
-                  </p>
-                </div>
-              </div>
-
-              {/* Checkbox de Retirada de Estoque */}
-              <div className="p-4 bg-linear-to-r from-orange-50 to-yellow-50 border-2 border-orange-200 rounded-lg">
-                <label className="flex items-center gap-3 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    name="retiradaEstoque"
-                    checked={formData.retiradaEstoque}
-                    onChange={handleChange}
-                    className="w-5 h-5 text-orange-600 bg-gray-100 border-gray-300 rounded focus:ring-orange-500 focus:ring-2 cursor-pointer"
-                  />
-                  <div className="flex-1">
-                    <span className="text-sm font-bold text-orange-900">
-                      📦 Retirada de Estoque (não conta como dinheiro)
-                    </span>
-                    <p className="text-xs text-orange-700 mt-1">
-                      Marque esta opção quando estiver retirando produtos da
-                      máquina sem que seja uma venda (exemplo: produtos
-                      danificados, devolução, transferência).
-                      automaticamente zeradas.
-                    </p>
-                  </div>
-                </label>
-              </div>
-
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-sm font-semibold text-gray-700 mb-2">
@@ -1011,7 +1828,11 @@ export function Movimentacoes() {
                     value={filtroLojaForm}
                     onChange={(e) => {
                       setFiltroLojaForm(e.target.value);
-                      setFormData({ ...formData, maquina_id: "" });
+                      setFormData({
+                        ...formData,
+                        maquina_id: "",
+                        produto_id: "",
+                      });
                     }}
                     className="select-field"
                     required
@@ -1046,7 +1867,9 @@ export function Movimentacoes() {
                     </option>
                     {maquinas
                       .filter(
-                        (m) => !filtroLojaForm || m.lojaId === filtroLojaForm
+                        (m) =>
+                          !filtroLojaForm ||
+                          String(m.lojaId) === String(filtroLojaForm),
                       )
                       .map((maquina) => (
                         <option key={maquina.id} value={maquina.id}>
@@ -1069,7 +1892,8 @@ export function Movimentacoes() {
                     name="produto_id"
                     value={formData.produto_id}
                     onChange={handleChange}
-                    className="select-field"
+                    className={`select-field ${formData.produto_id ? "border-blue-500 bg-blue-50" : ""}`}
+                    required
                   >
                     <option value="">Nenhum produto</option>
                     {produtos.map((produto) => (
@@ -1078,6 +1902,11 @@ export function Movimentacoes() {
                       </option>
                     ))}
                   </select>
+                  {formData.maquina_id && formData.produto_id && (
+                    <p className="text-[10px] text-blue-600 mt-1 animate-pulse">
+                      ✨ Produto sugerido com base na última visita
+                    </p>
+                  )}
                 </div>
 
                 <div className="md:col-span-2">
@@ -1095,22 +1924,575 @@ export function Movimentacoes() {
                 </div>
               </div>
 
-              <div className="flex gap-4 justify-end pt-4 border-t border-gray-200">
+              <div className="p-4 bg-white border border-blue-100 rounded-lg">
+                <label className="block text-sm font-semibold text-gray-700 mb-2">
+                  Foto dos contadores
+                </label>
+                <input
+                  id="foto-contadores-camera"
+                  type="file"
+                  accept="image/*"
+                  capture="environment"
+                  onChange={handleFotoContadores}
+                  className="sr-only"
+                  disabled={lendoFotoContadores}
+                />
+                <label
+                  htmlFor="foto-contadores-camera"
+                  className={`inline-flex w-full sm:w-auto items-center justify-center gap-2 rounded-lg px-4 py-2 font-semibold text-white shadow transition-colors ${
+                    lendoFotoContadores
+                      ? "cursor-not-allowed bg-gray-400"
+                      : "cursor-pointer bg-blue-600 hover:bg-blue-700"
+                  }`}
+                >
+                  <span aria-hidden="true">📷</span>
+                  {lendoFotoContadores ? "Lendo foto..." : "Tirar foto dos contadores"}
+                </label>
+                <p className="text-xs text-gray-500 mt-2">
+                  No celular, o botao abre a camera para fotografar os dois
+                  contadores. O maior numero sera usado como IN e o menor como
+                  OUT. Confira e ajuste se precisar.
+                </p>
+
+                {fotoContadoresPreview && (
+                  <div className="mt-3 grid grid-cols-1 md:grid-cols-[160px_1fr] gap-3 items-start">
+                    <img
+                      src={fotoContadoresPreview}
+                      alt="Foto dos contadores"
+                      className="w-full max-w-40 rounded-lg border border-gray-200 object-cover"
+                    />
+                    <div className="text-sm">
+                      {resultadoFotoContadores && (
+                        <p
+                          className={`font-medium ${
+                            lendoFotoContadores
+                              ? "text-blue-700"
+                              : "text-gray-700"
+                          }`}
+                        >
+                          {resultadoFotoContadores}
+                        </p>
+                      )}
+                      <p className="text-xs text-gray-500 mt-1">
+                        A foto nao sera salva no sistema. Ela fica somente para
+                        anexar na mensagem do WhatsApp.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={limparFotoContadores}
+                        className="mt-2 text-xs font-semibold text-red-600 hover:text-red-700"
+                      >
+                        Remover foto
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+              {/* Contadores da Máquina */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-2">
+                    📥 Contador IN (Entrada)
+                  </label>
+                  <input
+                    type="number"
+                    name="contadorIn"
+                    value={formData.contadorIn}
+                    onChange={handleChange}
+                    className="input-field"
+                    placeholder="0"
+                    min="0"
+                    required={!formData.ignoreInOut}
+                    disabled={formData.ignoreInOut}
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    Número do contador IN da máquina
+                  </p>
+                  {contadorInSuspeito && (
+                    <div className="mt-2 p-3 bg-red-50 border-l-4 border-red-500 rounded">
+                      <div className="flex items-start">
+                        <span className="text-red-600 text-lg mr-2">🚫</span>
+                        <div className="flex-1">
+                          <p className="text-xs font-bold text-red-800 mb-1">
+                            Diferença de {diferencaContadorIn} em relação ao
+                            último Contador IN registrado (
+                            {ultimoContadorMaquina.contadorIn}). Provavelmente
+                            há um erro de leitura ou digitação.
+                          </p>
+                          <label className="flex items-center gap-2 mt-2">
+                            <input
+                              type="checkbox"
+                              checked={confirmacaoContadorIn}
+                              onChange={(e) =>
+                                setConfirmacaoContadorIn(e.target.checked)
+                              }
+                              className="w-4 h-4 text-red-600 border-gray-300 rounded focus:ring-red-500"
+                            />
+                            <span className="text-xs font-semibold text-red-800">
+                              Tenho certeza que o Contador IN está correto
+                            </span>
+                          </label>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-2">
+                    📤 Contador OUT (Saída)
+                  </label>
+                  <input
+                    type="number"
+                    name="contadorOut"
+                    value={formData.contadorOut}
+                    onChange={handleChange}
+                    className="input-field"
+                    placeholder="0"
+                    min="0"
+                    required={!formData.ignoreInOut}
+                    disabled={formData.ignoreInOut}
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    Número do contador OUT da máquina
+                  </p>
+                  {contadorOutSuspeito && (
+                    <div className="mt-2 p-3 bg-red-50 border-l-4 border-red-500 rounded">
+                      <div className="flex items-start">
+                        <span className="text-red-600 text-lg mr-2">🚫</span>
+                        <div className="flex-1">
+                          <p className="text-xs font-bold text-red-800 mb-1">
+                            Diferença de {diferencaContadorOut} em relação ao
+                            último Contador OUT registrado (
+                            {ultimoContadorMaquina.contadorOut}). Provavelmente
+                            há um erro de leitura ou digitação.
+                          </p>
+                          <label className="flex items-center gap-2 mt-2">
+                            <input
+                              type="checkbox"
+                              checked={confirmacaoContadorOut}
+                              onChange={(e) =>
+                                setConfirmacaoContadorOut(e.target.checked)
+                              }
+                              className="w-4 h-4 text-red-600 border-gray-300 rounded focus:ring-red-500"
+                            />
+                            <span className="text-xs font-semibold text-red-800">
+                              Tenho certeza que o Contador OUT está correto
+                            </span>
+                          </label>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+              {/* Checkbox para ignorar IN/OUT */}
+              <div className="flex items-center mt-2 mb-4">
+                <input
+                  type="checkbox"
+                  id="ignoreInOut"
+                  name="ignoreInOut"
+                  checked={formData.ignoreInOut || false}
+                  onChange={handleChange}
+                  className="mr-2"
+                />
+                <label htmlFor="ignoreInOut" className="text-sm text-gray-700">
+                  Não preciso informar IN/OUT nesta movimentação
+                </label>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-2">
+                    📦 Quantidade Atual na Máquina *
+                  </label>
+                  <input
+                    type="number"
+                    name="quantidadeAtualMaquina"
+                    value={formData.quantidadeAtualMaquina}
+                    onChange={handleChange}
+                    className="input-field"
+                    placeholder={
+                      carregandoSugestaoMachinePay
+                        ? "Buscando na Machine Pay..."
+                        : "0"
+                    }
+                    min="0"
+                    disabled={carregandoSugestaoMachinePay}
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    Quantos produtos tem agora
+                  </p>
+                  {carregandoSugestaoMachinePay && (
+                    <p className="text-xs font-semibold text-blue-600 mt-1">
+                      💳 Buscando na Machine Pay...
+                    </p>
+                  )}
+                  {!carregandoSugestaoMachinePay &&
+                    sugestaoTotalPreMachinePay?.sugestaoDisponivel &&
+                    sugestaoTotalPreMachinePay.modo === "auto" && (
+                      <p className="text-xs font-semibold text-emerald-600 mt-1">
+                        {`${sugestaoTotalPreMachinePay.fonte === "compactPay" ? "📟" : "💳"} Sugestão via ${nomeFontePagamento(sugestaoTotalPreMachinePay.fonte)}`}
+                        : R${" "}
+                        {sugestaoTotalPreMachinePay.totalRecebidoDesdeUltimaMovimentacao.toFixed(
+                          2,
+                        )}{" "}
+                        recebidos desde a última coleta ({sugestaoTotalPreMachinePay.pulsos}{" "}
+                        pulso{sugestaoTotalPreMachinePay.pulsos === 1 ? "" : "s"}) →
+                        Total Pré sugerido: {sugestaoTotalPreMachinePay.sugestaoTotalPre}.
+                        Se o valor real for diferente, ajuste — vamos pedir
+                        para você confirmar que recontou.
+                      </p>
+                    )}
+                  {!carregandoSugestaoMachinePay &&
+                    sugestaoTotalPreMachinePay?.sugestaoDisponivel &&
+                    sugestaoTotalPreMachinePay.modo === "forcar_manual" && (
+                      <p className="text-xs font-semibold text-purple-600 mt-1">
+                        🔍 Conferência manual (a cada 15 dias): conte
+                        fisicamente e digite o valor.
+                      </p>
+                    )}
+                  {divergenciaMachinePaySuspeita && (
+                    <div className="mt-2 p-3 bg-red-50 border-l-4 border-red-500 rounded">
+                      <div className="flex items-start">
+                        <span className="text-red-600 text-lg mr-2">🚫</span>
+                        <div className="flex-1">
+                          <p className="text-xs font-bold text-red-800 mb-1">
+                            O valor digitado não confere com o que a{" "}
+                            {nomeFontePagamento(sugestaoTotalPreMachinePay?.fonte)}{" "}
+                            esperava. Reconte a máquina antes de confirmar.
+                          </p>
+                          <label className="flex items-center gap-2 mt-2">
+                            <input
+                              type="checkbox"
+                              checked={confirmacaoDivergenciaMachinePay}
+                              onChange={(e) =>
+                                setConfirmacaoDivergenciaMachinePay(
+                                  e.target.checked,
+                                )
+                              }
+                              className="w-4 h-4 text-red-600 border-gray-300 rounded focus:ring-red-500"
+                            />
+                            <span className="text-xs font-semibold text-red-800">
+                              Já recontei, o valor está correto mesmo assim
+                            </span>
+                          </label>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  {formData.quantidadeAtualMaquina && estoqueAnterior > 0 && (
+                    <p className="text-xs font-semibold text-red-600 mt-1">
+                      🔻 Saíram:{" "}
+                      {Math.max(
+                        0,
+                        estoqueAnterior -
+                          parseInt(formData.quantidadeAtualMaquina || 0),
+                      )}{" "}
+                      unidades
+                    </p>
+                  )}
+                  {saidasCompactPay?.carregando && (
+                    <p className="text-xs text-blue-600 mt-1">
+                      📟 Buscando prêmios entregues na CompactPay...
+                    </p>
+                  )}
+                  {saidasCompactPay?.erro && (
+                    <p className="text-xs text-gray-500 mt-1">
+                      📟 Não foi possível consultar os prêmios entregues na
+                      CompactPay.
+                    </p>
+                  )}
+                  {saidasCompactPay?.disponivel && (
+                    <p
+                      className={`text-xs font-semibold mt-1 ${
+                        formData.quantidadeAtualMaquina &&
+                        Math.max(
+                          0,
+                          estoqueAnterior -
+                            parseInt(formData.quantidadeAtualMaquina || 0),
+                        ) !== saidasCompactPay.saidas
+                          ? "text-orange-600"
+                          : "text-emerald-600"
+                      }`}
+                    >
+                      📟 CompactPay: {saidasCompactPay.saidas} prêmio
+                      {saidasCompactPay.saidas === 1 ? "" : "s"} entregue
+                      {saidasCompactPay.saidas === 1 ? "" : "s"} desde a última
+                      movimentação (
+                      {new Date(saidasCompactPay.desde).toLocaleString("pt-BR")}
+                      ). Esperado no Total Pré:{" "}
+                      {Math.max(
+                        0,
+                        (saidasCompactPay.totalPosAnterior ?? estoqueAnterior) -
+                          saidasCompactPay.saidas,
+                      )}
+                    </p>
+                  )}
+                  {alertaDivergencia && (
+                    <div className="mt-2 p-3 bg-yellow-50 border-l-4 border-yellow-400 rounded">
+                      <div className="flex items-start">
+                        <span className="text-yellow-600 text-lg mr-2">⚠️</span>
+                        <div className="flex-1">
+                          <p className="text-xs font-bold text-yellow-800 mb-1">
+                            Atenção: Possível erro de contagem!
+                          </p>
+                          <p className="text-xs text-yellow-700">
+                            Reconte por favor
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-2">
+                    📥 Quantidade Adicionada
+                  </label>
+                  <input
+                    type="number"
+                    name="quantidadeAdicionada"
+                    value={formData.quantidadeAdicionada}
+                    onChange={handleChange}
+                    className="input-field"
+                    placeholder="0"
+                    min="0"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    Quantos produtos foram adicionados
+                  </p>
+                  {formData.quantidadeAdicionada &&
+                    formData.quantidadeAtualMaquina && (
+                      <p className="text-xs font-semibold text-green-600 mt-1">
+                        ✅ Novo total:{" "}
+                        {parseInt(formData.quantidadeAtualMaquina || 0) +
+                          parseInt(formData.quantidadeAdicionada || 0)}{" "}
+                        unidades
+                      </p>
+                    )}
+                </div>
+
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-2">
+                    🎫 Quantidade de Fichas
+                  </label>
+                  <input
+                    type="number"
+                    name="fichas"
+                    value={formData.fichas}
+                    onChange={handleChange}
+                    className="input-field"
+                    placeholder="0"
+                    min="0"
+                    disabled={formData.retiradaEstoque}
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    Fichas coletadas da máquina
+                  </p>
+                </div>
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-2">
+                    ❌ Retirada de Produto
+                  </label>
+                  <input
+                    type="number"
+                    name="retiradaProduto"
+                    value={formData.retiradaProduto}
+                    onChange={handleChange}
+                    className="input-field"
+                    placeholder="0"
+                    min="0"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    Quantidade de produtos retirados (não conta como saída
+                    financeira)
+                  </p>
+                  <label className="flex items-center mt-2 gap-2">
+                    <input
+                      type="checkbox"
+                      name="retiradaProdutoDevolverEstoque"
+                      checked={formData.retiradaProdutoDevolverEstoque || false}
+                      onChange={handleChange}
+                      className="w-4 h-4 text-green-600 border-gray-300 rounded focus:ring-green-500"
+                    />
+                    <span className="text-xs text-green-700">
+                      Devolver retirada para o estoque da loja
+                    </span>
+                  </label>
+                </div>
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-2">
+                    💵 Valor em Notas (R$)
+                  </label>
+                  <input
+                    type="number"
+                    name="quantidade_notas_entrada"
+                    value={formData.quantidade_notas_entrada}
+                    onChange={handleChange}
+                    className="input-field"
+                    placeholder="0.00"
+                    min="0"
+                    step="0.01"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    Valor total em dinheiro (notas) inserido na máquina
+                  </p>
+                </div>
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-2">
+                    💳 Valor Digital (Pix/Maquininha) (R$)
+                  </label>
+                  <input
+                    type="number"
+                    name="valor_entrada_maquininha_pix"
+                    value={formData.valor_entrada_maquininha_pix}
+                    onChange={handleChange}
+                    className="input-field"
+                    placeholder="0.00"
+                    min="0"
+                    step="0.01"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    Valor total recebido via pagamento digital (Pix/Maquininha)
+                  </p>
+                </div>
+              </div>
+
+              {/* Checkbox de Retirada de Estoque */}
+              <div className="p-4 bg-linear-to-r from-orange-50 to-yellow-50 border-2 border-orange-200 rounded-lg">
+                <label className="flex items-center gap-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    name="retiradaEstoque"
+                    checked={formData.retiradaEstoque}
+                    onChange={handleChange}
+                    className="w-5 h-5 text-orange-600 bg-gray-100 border-gray-300 rounded focus:ring-orange-500 focus:ring-2 cursor-pointer"
+                  />
+                  <div className="flex-1">
+                    <span className="text-sm font-bold text-orange-900">
+                      📦 Retirada de Estoque (não conta como dinheiro)
+                    </span>
+                    <p className="text-xs text-orange-700 mt-1">
+                      Marque esta opção quando estiver retirando produtos da
+                      máquina sem que seja uma venda (exemplo: produtos
+                      danificados, devolução, transferência). As fichas serão
+                      automaticamente zeradas.
+                    </p>
+                  </div>
+                </label>
+              </div>
+
+              <div className="flex items-start gap-2 pt-4 border-t border-gray-200 bg-amber-50 border border-amber-200 rounded-lg p-3">
+                <input
+                  type="checkbox"
+                  id="naoVaiRegistrar"
+                  checked={naoVaiRegistrar}
+                  onChange={(e) => {
+                    setNaoVaiRegistrar(e.target.checked);
+                    if (!e.target.checked) {
+                      setMostrarObsAlerta(false);
+                      setObsAlerta("");
+                    }
+                  }}
+                  className="mt-1"
+                />
+                <label htmlFor="naoVaiRegistrar" className="text-sm text-amber-900">
+                  Não vou registrar esta movimentação agora — só quero avisar
+                  pelo WhatsApp. (isso gera um alerta pra loja acompanhar)
+                </label>
+              </div>
+
+              {mostrarObsAlerta && (
+                <div className="border border-amber-300 bg-amber-50 rounded-lg p-4 space-y-2">
+                  <label className="block text-sm font-semibold text-amber-900">
+                    Por que você não vai registrar essa movimentação agora?
+                  </label>
+                  <textarea
+                    value={obsAlerta}
+                    onChange={(e) => setObsAlerta(e.target.value)}
+                    className="input-field"
+                    rows="2"
+                    placeholder="Explique o motivo (obrigatório)"
+                  />
+                  <div className="flex gap-2 justify-end">
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      onClick={() => setMostrarObsAlerta(false)}
+                      disabled={enviandoAlerta}
+                    >
+                      Voltar
+                    </button>
+                    <button
+                      type="button"
+                      className="px-4 py-2 bg-green-500 hover:bg-green-600 text-white font-semibold rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                      onClick={confirmarEnvioBypassWhatsapp}
+                      disabled={enviandoAlerta || !obsAlerta.trim()}
+                    >
+                      {enviandoAlerta
+                        ? "Enviando..."
+                        : "Confirmar e enviar para WhatsApp"}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <div className="flex flex-col sm:flex-row gap-3 sm:gap-4 sm:justify-end pt-4 border-t border-gray-200">
+                {error && (
+                  <AlertBox
+                    type="error"
+                    message={error}
+                    onClose={() => setError("")}
+                  />
+                )}
                 <button
                   type="button"
                   onClick={() => {
                     setShowForm(false);
                     setFiltroLojaForm("");
+                    limparFotoContadores();
+                    resetFluxoWhatsappBypass();
+                    setAlertaOrigemId(null);
                   }}
-                  className="btn-secondary"
+                  className="btn-secondary w-full sm:w-auto"
                   disabled={salvandoMovimentacao}
                 >
                   Cancelar
                 </button>
                 <button
+                  type="button"
+                  onClick={handleClickEnviarWhatsapp}
+                  className={`px-4 py-2 font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 shadow w-full sm:w-auto ${
+                    naoVaiRegistrar
+                      ? "bg-green-500 hover:bg-green-600 text-white"
+                      : "bg-gray-300 text-gray-500 cursor-not-allowed"
+                  }`}
+                  disabled={salvandoMovimentacao || !naoVaiRegistrar}
+                  title={
+                    naoVaiRegistrar
+                      ? "Enviar aviso pelo WhatsApp sem registrar"
+                      : "Marque a caixa acima para liberar este botão"
+                  }
+                >
+                  <svg
+                    className="w-5 h-5"
+                    fill="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z" />
+                  </svg>
+                  Enviar para WhatsApp
+                </button>
+                <button
                   type="submit"
-                  className="btn-primary"
-                  disabled={salvandoMovimentacao}
+                  className="btn-primary w-full sm:w-auto"
+                  disabled={
+                    salvandoMovimentacao ||
+                    (contadorInSuspeito && !confirmacaoContadorIn) ||
+                    (contadorOutSuspeito && !confirmacaoContadorOut) ||
+                    (divergenciaMachinePaySuspeita &&
+                      !confirmacaoDivergenciaMachinePay)
+                  }
                 >
                   {salvandoMovimentacao ? (
                     <span className="flex items-center gap-2">
@@ -1156,7 +2538,7 @@ export function Movimentacoes() {
                 </button>
               </div>
             </form>
-          </>
+          </div>
         )}
 
         {/* Histórico de Movimentações - Apenas para ADMIN */}
@@ -1197,55 +2579,118 @@ export function Movimentacoes() {
           </div>
         )}
 
-        {/* Seção Movimentações de Estoque de Loja */}
-        <div className="mt-12">
-          <h2 className="text-2xl font-bold mb-6 flex items-center gap-2">
-            <span className="text-3xl">🏪</span>
-            Movimentações de Estoque de Loja
-          </h2>
-          {/* Filtros */}
-          <div className="mb-4 flex flex-wrap gap-4">
-            <select
-              className="input-field"
-              value={filtroLojaEstoque}
-              onChange={(e) => setFiltroLojaEstoque(e.target.value)}
-            >
-              <option value="">Todas as lojas</option>
-              {lojas.map((loja) => (
-                <option key={loja.id} value={loja.id}>
-                  {loja.nome}
-                </option>
-              ))}
-            </select>
-            <input
-              type="date"
-              className="input-field"
-              value={filtroDataEstoque}
-              onChange={(e) => setFiltroDataEstoque(e.target.value)}
-            />
-            <input
-              type="text"
-              className="input-field"
-              placeholder="Responsável"
-              value={filtroResponsavelEstoque}
-              onChange={(e) => setFiltroResponsavelEstoque(e.target.value)}
+        {/* Seção Movimentações de Estoque de Loja - visível apenas para ADMIN */}
+        {usuario?.role === "ADMIN" && (
+          <div className="mt-12">
+            <h2 className="text-2xl font-bold mb-6 flex items-center gap-2">
+              <span className="text-3xl">🏪</span>
+              Movimentações de Estoque de Loja
+            </h2>
+            {/* Filtros */}
+            <div className="mb-5 rounded-2xl border border-gray-200 bg-white/80 backdrop-blur-sm shadow-sm p-4 md:p-5">
+              <div className="flex items-center justify-between gap-3 mb-4">
+                <h3 className="text-sm md:text-base font-bold text-gray-800 flex items-center gap-2">
+                  <span>🔎</span>
+                  Filtros
+                </h3>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setFiltroLojaEstoque("");
+                    setFiltroDataInicioEstoque("");
+                    setFiltroDataFimEstoque("");
+                    setFiltroResponsavelEstoque("");
+                  }}
+                  className="text-xs md:text-sm font-semibold text-blue-700 hover:text-blue-800 transition-colors"
+                >
+                  Limpar filtros
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-2">
+                    Loja
+                  </label>
+                  <select
+                    className="input-field"
+                    value={filtroLojaEstoque}
+                    onChange={(e) => setFiltroLojaEstoque(e.target.value)}
+                  >
+                    <option value="">Todas as lojas</option>
+                    {lojas.map((loja) => (
+                      <option key={loja.id} value={loja.id}>
+                        {loja.nome}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-2">
+                    Data início
+                  </label>
+                  <input
+                    type="date"
+                    className="input-field"
+                    value={filtroDataInicioEstoque}
+                    onChange={(e) => setFiltroDataInicioEstoque(e.target.value)}
+                    aria-label="Data início"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-2">
+                    Data fim
+                  </label>
+                  <input
+                    type="date"
+                    className="input-field"
+                    value={filtroDataFimEstoque}
+                    onChange={(e) => setFiltroDataFimEstoque(e.target.value)}
+                    aria-label="Data fim"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-2">
+                    Responsável
+                  </label>
+                  <input
+                    type="text"
+                    className="input-field"
+                    placeholder="Digite o nome"
+                    value={filtroResponsavelEstoque}
+                    onChange={(e) =>
+                      setFiltroResponsavelEstoque(e.target.value)
+                    }
+                  />
+                </div>
+              </div>
+
+              <p className="text-xs text-gray-500 mt-3">
+                Sem selecionar datas, a tabela mostra automaticamente apenas os
+                registros de hoje.
+              </p>
+            </div>
+            <TabelaMovimentacoesEstoqueDeLoja
+              movimentacoesEstoqueLoja={movimentacoesEstoqueLoja}
+              lojas={lojas}
+              produtos={produtos}
+              filtroLojaEstoque={filtroLojaEstoque}
+              filtroDataInicioEstoque={filtroDataInicioEstoque}
+              filtroDataFimEstoque={filtroDataFimEstoque}
+              filtroResponsavelEstoque={filtroResponsavelEstoque}
+              setEditandoEstoqueLoja={setEditandoEstoqueLoja}
+              setExcluindoEstoqueLoja={setExcluindoEstoqueLoja}
+              onChangeEstoqueLoja={carregarDados}
             />
           </div>
-          <TabelaMovimentacoesEstoqueDeLoja
-            movimentacoesEstoqueLoja={movimentacoesEstoqueLoja}
-            lojas={lojas}
-            filtroLojaEstoque={filtroLojaEstoque}
-            filtroDataEstoque={filtroDataEstoque}
-            filtroResponsavelEstoque={filtroResponsavelEstoque}
-            setEditandoEstoqueLoja={setEditandoEstoqueLoja}
-            setExcluindoEstoqueLoja={setExcluindoEstoqueLoja}
-            onChangeEstoqueLoja={carregarDados}
-          />
-        </div>
+        )}
 
         {/* Modal de Edição */}
         {editandoMovimentacao && usuario?.role === "ADMIN" && (
-          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
             <div className="bg-white rounded-xl shadow-2xl max-w-md w-full p-6">
               <div className="flex items-center justify-between mb-4">
                 <h3 className="text-xl font-bold text-gray-900 flex items-center gap-2">
@@ -1278,34 +2723,32 @@ export function Movimentacoes() {
                     <strong>Data:</strong>{" "}
                     {new Date(
                       editandoMovimentacao.dataColeta ||
-                        editandoMovimentacao.createdAt
+                        editandoMovimentacao.createdAt,
                     ).toLocaleString("pt-BR")}
                   </p>
                   <p className="text-sm text-gray-600 mt-1">
                     <strong>Máquina:</strong>{" "}
                     {maquinas.find(
-                      (m) => m.id === editandoMovimentacao.maquinaId
+                      (m) => m.id === editandoMovimentacao.maquinaId,
                     )?.codigo || "N/A"}
                   </p>
                 </div>
 
                 <div>
                   <label className="block text-sm font-semibold text-gray-700 mb-2">
-                    Data e hora da movimentação
+                    🎫 Quantidade de Fichas
                   </label>
                   <input
-                    type="datetime-local"
-                    value={formEdicao.dataColeta}
+                    type="number"
+                    min="0"
+                    value={formEdicao.fichas}
                     onChange={(e) =>
-                      setFormEdicao({
-                        ...formEdicao,
-                        dataColeta: e.target.value,
-                      })
+                      setFormEdicao({ ...formEdicao, fichas: e.target.value })
                     }
                     className="input-field"
+                    placeholder="0"
                   />
                 </div>
-
 
                 <div>
                   <label className="block text-sm font-semibold text-gray-700 mb-2">
@@ -1326,43 +2769,9 @@ export function Movimentacoes() {
                   />
                 </div>
 
-                <h4 className="text-md font-semibold text-gray-800 mt-4">
-                  💰 Valores de Entrada
-                </h4>
-
-
-
                 <div>
                   <label className="block text-sm font-semibold text-gray-700 mb-2">
-                    💵 Valor Entrada Notas (R$)
-                  </label>
-                  <input
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    value={formEdicao.valorEntradaNotas}
-                    onChange={(e) =>
-                      setFormEdicao({
-                        ...formEdicao,
-                        valorEntradaNotas: e.target.value,
-                      })
-                    }
-                    className="input-field"
-                    placeholder="0.00"
-                  />
-                </div>
-
-                <p className="text-xs text-gray-500">
-                  O valor digital (cartão/PIX) é calculado automaticamente pelo sistema via Machine Pay e pode ser corrigido na tela de Financeiro.
-                </p>
-
-                <h4 className="text-md font-semibold text-gray-400 mt-4">
-                  ⚠️ Campos Antigos (Não usar)
-                </h4>
-
-                <div>
-                  <label className="block text-sm font-semibold text-gray-400 mb-2">
-                    💵 Quantidade de Notas (Deprecated)
+                    💵 Quantidade de Notas
                   </label>
                   <input
                     type="number"
@@ -1374,14 +2783,13 @@ export function Movimentacoes() {
                         quantidade_notas_entrada: e.target.value,
                       })
                     }
-                    className="input-field bg-gray-100"
+                    className="input-field"
                     placeholder="0"
-                    disabled
                   />
                 </div>
                 <div>
-                  <label className="block text-sm font-semibold text-gray-400 mb-2">
-                    💳 Valor Digital (Deprecated)
+                  <label className="block text-sm font-semibold text-gray-700 mb-2">
+                    💳 Valor Digital (Pix/Maquininha) (R$)
                   </label>
                   <input
                     type="number"
@@ -1394,9 +2802,8 @@ export function Movimentacoes() {
                         valor_entrada_maquininha_pix: e.target.value,
                       })
                     }
-                    className="input-field bg-gray-100"
+                    className="input-field"
                     placeholder="0.00"
-                    disabled
                   />
                 </div>
                 <div className="flex gap-3 pt-4">
@@ -1417,7 +2824,7 @@ export function Movimentacoes() {
       </div>
       {/* --- MODAL DE EXCLUSÃO DE ESTOQUE LOJA --- */}
       {excluindoEstoqueLoja && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-xl shadow-2xl max-w-sm w-full p-6">
             <div className="text-center">
               <div className="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-red-100 mb-4">
@@ -1460,7 +2867,7 @@ export function Movimentacoes() {
 
       {/* --- MODAL DE EDIÇÃO DE ESTOQUE LOJA --- */}
       {editandoEstoqueLoja && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-xl shadow-2xl max-w-md w-full p-6">
             <h3 className="text-xl font-bold text-gray-900 mb-4">
               ✏️ Editar Produtos Enviados
@@ -1497,7 +2904,7 @@ export function Movimentacoes() {
                             editandoEstoqueLoja.produtosEnviados.map((p, i) =>
                               i === idx
                                 ? { ...p, quantidade: e.target.value }
-                                : p
+                                : p,
                             );
                           setEditandoEstoqueLoja({
                             ...editandoEstoqueLoja,
@@ -1513,7 +2920,7 @@ export function Movimentacoes() {
                             editandoEstoqueLoja.produtosEnviados.map((p, i) =>
                               i === idx
                                 ? { ...p, tipoMovimentacao: e.target.value }
-                                : p
+                                : p,
                             );
                           setEditandoEstoqueLoja({
                             ...editandoEstoqueLoja,
@@ -1547,20 +2954,19 @@ export function Movimentacoes() {
           </div>
         </div>
       )}
-      <MovimentacaoInconsistenteModal
-        inconsistencias={modalInconsistencia?.inconsistencias || []}
-        justificativa={justificativaInconsistencia}
-        setJustificativa={setJustificativaInconsistencia}
-        onCancel={() => {
-          setModalInconsistencia(null);
-          setJustificativaInconsistencia("");
-        }}
-        onConfirm={salvarMovimentacaoInconsistente}
-        loading={salvandoMovimentacao}
+
+      <ConfirmDialog
+        isOpen={mostrarConfirmacaoMovimentacao}
+        onClose={() => setMostrarConfirmacaoMovimentacao(false)}
+        onConfirm={confirmarRegistroMovimentacao}
+        title="Confirmar Movimentação"
+        message={resumoConfirmacaoMovimentacao}
+        confirmText="Sim, registrar"
+        cancelText="Revisar"
+        type="primary"
       />
 
       <Footer />
     </div>
   );
 }
-

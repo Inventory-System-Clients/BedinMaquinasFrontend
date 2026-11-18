@@ -43,7 +43,6 @@ export default defineConfig({
           // Páginas de roteiros e movimentações
           'roteiro-pages': [
             './src/pages/Roteiros.jsx',
-            './src/pages/SelecionarRoteiro.jsx',
             './src/pages/LojasRoteiro.jsx',
             './src/pages/MovimentacoesLoja.jsx',
             './src/pages/GerenciarRoteiros.jsx',

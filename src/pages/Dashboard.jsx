@@ -2340,7 +2340,7 @@ export function Dashboard() {
                                   <span>📦</span> Total Atual
                                 </p>
                                 <p className="font-semibold text-purple-600">
-                                  {(mov.totalPre || 0) + (mov.abastecidas || 0)}
+                                  {mov.totalPos ?? (mov.totalPre || 0) + (mov.abastecidas || 0)}
                                 </p>
                               </div>
                               <div className="sm:col-span-2 lg:col-span-2">
@@ -2363,8 +2363,8 @@ export function Dashboard() {
                                     </p>
                                   </div>
                                 ) : temSacola ? (
-                                  <p className="text-xs font-semibold text-amber-600">
-                                    Sacola levada, aguardando preenchimento no Financeiro.
+                                  <p className="text-xs text-gray-500">
+                                    Sem valores registrados nesta movimentação.
                                   </p>
                                 ) : (
                                   <p className="text-xs text-gray-500">

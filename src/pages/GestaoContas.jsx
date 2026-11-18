@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
 import { Navbar } from "../components/Navbar";
 import { Footer } from "../components/Footer";
 import { PageHeader } from "../components/UIComponents";
@@ -11,7 +10,7 @@ import BancosPanel from "../components/gestaoContas/BancosPanel";
 import FluxoCaixaPanel from "../components/gestaoContas/FluxoCaixaPanel";
 import WhatsappPanel from "../components/gestaoContas/WhatsappPanel";
 
-// Financeiro → Gestão de Contas: controle de contas da empresa (a pagar, a receber,
+// Aba Financeiro (/financeiro) = Gestão de Contas: controle de contas da empresa (a pagar, a receber,
 // contas bancárias e fluxo de caixa), no mesmo modelo do financeiro da Reblind.
 
 const ABAS = [
@@ -93,14 +92,9 @@ export function GestaoContas() {
         <Navbar />
         <div className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
           <PageHeader
-            title="Gestão de Contas"
-            subtitle="Contas a pagar e a receber, contas bancárias, fluxo de caixa e análises da empresa"
+            title="Financeiro"
+            subtitle="Gestão de contas: a pagar e a receber, contas bancárias, fluxo de caixa, análises e avisos no WhatsApp"
             icon="📒"
-            action={
-              <Link to="/financeiro" className="btn-secondary inline-block">
-                ← Voltar ao Financeiro
-              </Link>
-            }
           />
 
           <div className="mb-6 flex flex-wrap gap-1 border-b border-gray-200">
