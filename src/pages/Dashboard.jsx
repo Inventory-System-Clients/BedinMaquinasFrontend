@@ -2139,48 +2139,6 @@ export function Dashboard() {
                     </div>
                   )}
                   {/* Removido: valorFicha, fichasNecessarias, moedas para jogar */}
-                  {maquinaSelecionada.forcaForte !== null &&
-                    maquinaSelecionada.forcaForte !== undefined && (
-                      <div>
-                        <p className="text-sm text-gray-600">💪 Força Forte</p>
-                        <p className="text-lg font-semibold">
-                          {maquinaSelecionada.forcaForte}%
-                        </p>
-                      </div>
-                    )}
-                  {maquinaSelecionada.forcaFraca !== null &&
-                    maquinaSelecionada.forcaFraca !== undefined && (
-                      <div>
-                        <p className="text-sm text-gray-600">🤏 Força Fraca</p>
-                        <p className="text-lg font-semibold">
-                          {maquinaSelecionada.forcaFraca}%
-                        </p>
-                      </div>
-                    )}
-                  {maquinaSelecionada.forcaPremium !== null &&
-                    maquinaSelecionada.forcaPremium !== undefined && (
-                      <div>
-                        <p className="text-sm text-gray-600">
-                          ⭐ Força Premium
-                        </p>
-                        <p className="text-lg font-semibold">
-                          {maquinaSelecionada.forcaPremium}%
-                        </p>
-                      </div>
-                    )}
-                  {maquinaSelecionada.jogadasPremium && (
-                    <div>
-                      <p className="text-sm text-gray-600">
-                        🎮 Jogadas Premium
-                      </p>
-                      <p className="text-lg font-semibold">
-                        {maquinaSelecionada.jogadasPremium}{" "}
-                        {maquinaSelecionada.jogadasPremium === 1
-                          ? "jogada"
-                          : "jogadas"}
-                      </p>
-                    </div>
-                  )}
                   <div>
                     <p className="text-sm text-gray-600">Status</p>
                     <p className="text-lg font-semibold">

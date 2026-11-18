@@ -17,10 +17,6 @@ export function MaquinaForm() {
     loja_id: "",
     tipo: "",
     capacidadePadrao: "",
-    forcaForte: "",
-    forcaFraca: "",
-    forcaPremium: "",
-    jogadasPremium: "",
     percentualAlertaEstoque: "",
     percentualComissao: "",
     tipoPagamentoLoja: "comissao",
@@ -75,10 +71,6 @@ export function MaquinaForm() {
         tipo: response.data.tipo || "",
         capacidadePadrao: response.data.capacidadePadrao || "",
         // Removido valorMoeda e moedasNecessarias
-        forcaForte: response.data.forcaForte || "",
-        forcaFraca: response.data.forcaFraca || "",
-        forcaPremium: response.data.forcaPremium || "",
-        jogadasPremium: response.data.jogadasPremium || "",
         percentualAlertaEstoque: response.data.percentualAlertaEstoque || 20,
         percentualComissao: response.data.percentualComissao || 0,
         tipoPagamentoLoja: response.data.tipoPagamentoLoja || "comissao",
@@ -148,10 +140,6 @@ export function MaquinaForm() {
         tipo: formData.tipo?.trim() || null,
         capacidadePadrao: parseInt(formData.capacidadePadrao, 10) || 0,
         // Removido valorMoeda e moedasNecessarias
-        forcaForte: parseInt(formData.forcaForte, 10) || null,
-        forcaFraca: parseInt(formData.forcaFraca, 10) || null,
-        forcaPremium: parseInt(formData.forcaPremium, 10) || null,
-        jogadasPremium: parseInt(formData.jogadasPremium, 10) || null,
         percentualAlertaEstoque:
           parseInt(formData.percentualAlertaEstoque, 10) || 20,
         percentualComissao: parseFloat(formData.percentualComissao) || 0,
@@ -348,80 +336,9 @@ export function MaquinaForm() {
 
 
 
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-2">
-                    💪 Força Forte (%)
-                  </label>
-                  <input
-                    type="number"
-                    name="forcaForte"
-                    value={formData.forcaForte}
-                    onChange={handleChange}
-                    className="input-field"
-                    placeholder="Ex: 90"
-                    min="0"
-                    max="100"
-                  />
-                  <p className="text-xs text-gray-500 mt-1">
-                    Parâmetro de força forte da garra (0-100%)
-                  </p>
-                </div>
 
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-2">
-                    🤏 Força Fraca (%)
-                  </label>
-                  <input
-                    type="number"
-                    name="forcaFraca"
-                    value={formData.forcaFraca}
-                    onChange={handleChange}
-                    className="input-field"
-                    placeholder="Ex: 30"
-                    min="0"
-                    max="100"
-                  />
-                  <p className="text-xs text-gray-500 mt-1">
-                    Parâmetro de força fraca da garra (0-100%)
-                  </p>
-                </div>
 
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-2">
-                    ⭐ Força Premium (%)
-                  </label>
-                  <input
-                    type="number"
-                    name="forcaPremium"
-                    value={formData.forcaPremium}
-                    onChange={handleChange}
-                    className="input-field"
-                    placeholder="Ex: 100"
-                    min="0"
-                    max="100"
-                  />
-                  <p className="text-xs text-gray-500 mt-1">
-                    Parâmetro de força premium da garra (0-100%)
-                  </p>
-                </div>
 
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-2">
-                    🎮 Jogadas para Força Premium
-                  </label>
-                  <input
-                    type="number"
-                    name="jogadasPremium"
-                    value={formData.jogadasPremium}
-                    onChange={handleChange}
-                    className="input-field"
-                    placeholder="Ex: 10"
-                    min="1"
-                  />
-                  <p className="text-xs text-gray-500 mt-1">
-                    Quantidade de jogadas com força premium
-                  </p>
-                </div>
 
                 <div>
                   <label className="block text-sm font-semibold text-gray-700 mb-2">
