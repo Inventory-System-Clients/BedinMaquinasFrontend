@@ -36,7 +36,6 @@ const Sangrias = lazy(() => import("./pages/Sangrias").then(m => ({ default: m.S
 const GestaoContas = lazy(() => import("./pages/GestaoContas").then(m => ({ default: m.GestaoContas })));
 const Graficos = lazy(() => import("./pages/Graficos").then(m => ({ default: m.Graficos })));
 const Relatorios = lazy(() => import("./pages/Relatorios").then(m => ({ default: m.Relatorios })));
-const AlertasEstoque = lazy(() => import("./pages/AlertasEstoque").then(m => ({ default: m.AlertasEstoque })));
 const StyleGuide = lazy(() => import("./pages/StyleGuide").then(m => ({ default: m.StyleGuide })));
 
 function AppRoutes() {
@@ -255,14 +254,8 @@ function AppRoutes() {
             }
           />
 
-          <Route
-            path="/alertas-estoque"
-            element={
-              <PrivateRoute adminOnly>
-                <AlertasEstoque />
-              </PrivateRoute>
-            }
-          />
+          {/* Sem controle de estoque: a antiga página de alertas de estoque saiu. */}
+          <Route path="/alertas-estoque" element={<Navigate to="/" replace />} />
 
           <Route
             path="/relatorios"

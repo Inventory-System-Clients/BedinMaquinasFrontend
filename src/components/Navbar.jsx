@@ -15,7 +15,6 @@ const LINKS = [
   // Financeiro = Gestão de Contas (contas a pagar/receber, bancos, fluxo de caixa, WhatsApp)
   { to: "/financeiro", label: "Financeiro", icone: "wallet", roles: ["ADMIN", "FINANCEIRO"] },
   { to: "/graficos", label: "Gráficos", icone: "chart", roles: ["ADMIN"] },
-  { to: "/alertas-estoque", label: "Alertas de Estoque", icone: "bell", roles: ["ADMIN"] },
   { to: "/relatorios", label: "Relatórios", icone: "file", roles: ["ADMIN"] },
   { to: "/usuarios", label: "Usuários", icone: "users", roles: ["ADMIN"] },
 ];

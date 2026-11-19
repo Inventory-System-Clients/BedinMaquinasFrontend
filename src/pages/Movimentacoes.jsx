@@ -3,49 +3,153 @@ import { useLocation, useNavigate } from "react-router-dom";
 import api from "../services/api";
 import { Navbar } from "../components/Navbar";
 import { Footer } from "../components/Footer";
-import {
-  PageHeader,
-  StatsGrid,
-  DataTable,
-  Badge,
-  AlertBox,
-  ConfirmDialog,
-} from "../components/UIComponents";
-import RegistrarDinheiro from "../components/RegistrarDinheiro";
-import LancarGastoVariavel from "../components/LancarGastoVariavel";
-import { PageLoader, EmptyState } from "../components/Loading";
+import { PageHeader, AlertBox } from "../components/UIComponents";
+import { PageLoader } from "../components/Loading";
 import { useAuth } from "../contexts/AuthContext";
-import AvisosMaquinasFaltam from "../components/AvisosMaquinasFaltam";
-import TabelaMovimentacoesEstoqueDeLoja from "../components/TabelaMovimentacoesEstoqueDeLoja";
 import {
   salvarFotoUltimaMovimentacao,
   obterFotoUltimaMovimentacao,
   limparFotoUltimaMovimentacao,
 } from "../services/fotoUltimaMovimentacaoDb";
 
-const CHAVE_ULTIMA_MENSAGEM_WHATSAPP = "ultimaMensagemMovimentacaoWhatsapp";
+// Tela de Movimentações no formato da AgarraMais: escolhe a loja, aparecem as
+// máquinas dela com uma barrinha de andamento, e cada máquina guarda o que já
+// foi digitado (rascunho) — dá para ir fazendo várias ao mesmo tempo, etapa
+// por etapa, e registrar cada uma quando estiver completa.
+//
+// Versão simplificada do Bedin: sem controle de estoque. O operador informa só
+// o produto, os contadores IN/OUT, quanto abasteceu, quanto retirou de
+// dinheiro e os gastos extras; o que entrou na Machine Pay é somado sozinho
+// (da última movimentação até agora, ou a partir da data que ele escolher).
 
-// Salto grande demais no contador de um registro pro outro costuma ser erro
-// de leitura/digitação (ex: trocar os dois contadores, ou digitar um dígito
-// a mais). Acima desses limites, exige confirmação explícita do operador
-// antes de deixar registrar.
+const CHAVE_ULTIMA_MENSAGEM_WHATSAPP = "ultimaMensagemMovimentacaoWhatsapp";
+const CHAVE_RASCUNHOS = "rascunhosMovimentacaoBedin";
+// Conta a partir da última alteração na máquina.
+const VALIDADE_RASCUNHO_MS = 3 * 60 * 60 * 1000;
+// Uma máquina conta como "concluída" na lista se teve movimentação nessa janela.
+const HORAS_MAQUINA_CONCLUIDA = 12;
+// Salto grande no contador costuma ser erro de leitura/digitação.
 const LIMITE_DIFERENCA_CONTADOR_IN = 300;
 const LIMITE_DIFERENCA_CONTADOR_OUT = 40;
 
-// Em celular (onde os funcionários realmente usam isso, no chão de loja),
-// abrir uma aba em branco e só depois redirecioná-la pra wa.me é frágil: em
-// vários navegadores/WebViews Android essa aba fica presa em "about:blank"
-// e nunca navega, deixando quem tá coletando sem conseguir mandar a
-// mensagem. Por isso, em celular, nem abrimos aba nova — navegamos a
-// própria aba pra wa.me (nunca é bloqueado por popup blocker, já que não é
-// popup). Em desktop mantemos o truque de abrir em branco: Safari/iOS só
-// permite abrir uma nova aba (ou usar navigator.share) de forma síncrona,
-// dentro do mesmo gesto de clique, e como o envio ao WhatsApp só acontece
-// depois de um `await` (chamada à API) essa permissão já expirou quando
-// chegamos lá.
-// Link do WhatsApp: api.whatsapp.com/send direto. O redirecionamento do wa.me troca os
-// emojis da mensagem por "�" (ex.: "Sim ✅" chegava "Sim �") — problema que também
-// existe na AgarraMais.
+const FORMULARIO_VAZIO = {
+  maquina_id: "",
+  produto_id: "",
+  contadorIn: "",
+  contadorOut: "",
+  quantidadeAdicionada: "",
+  dinheiroRetirado: "",
+  // Vazio = desde a última movimentação. Preenchido = o operador escolheu.
+  machinePayInicio: "",
+  gastos: [],
+  observacao: "",
+};
+const CAMPOS_RASCUNHO = Object.keys(FORMULARIO_VAZIO).filter(
+  (c) => c !== "maquina_id",
+);
+
+const campoPreenchido = (valor) =>
+  valor !== "" && valor !== null && valor !== undefined;
+
+const numero = (valor) => {
+  if (!campoPreenchido(valor)) return 0;
+  const n = Number(String(valor).replace(",", "."));
+  return Number.isFinite(n) ? n : 0;
+};
+
+const formatarReais = (valor) =>
+  Number(valor || 0).toLocaleString("pt-BR", {
+    style: "currency",
+    currency: "BRL",
+  });
+
+const formatarDataHora = (valor) =>
+  valor
+    ? new Date(valor).toLocaleString("pt-BR", {
+        day: "2-digit",
+        month: "2-digit",
+        year: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+      })
+    : "-";
+
+// Data no formato do <input type="datetime-local"> (YYYY-MM-DDTHH:mm, hora local).
+const paraInputDataHora = (valor) => {
+  const data = valor ? new Date(valor) : new Date();
+  if (Number.isNaN(data.getTime())) return "";
+  const local = new Date(data.getTime() - data.getTimezoneOffset() * 60000);
+  return local.toISOString().slice(0, 16);
+};
+
+const gastosValidos = (gastos = []) =>
+  gastos.filter((g) => String(g.descricao || "").trim() && numero(g.valor) > 0);
+
+const gastosIncompletos = (gastos = []) =>
+  gastos.filter(
+    (g) =>
+      (String(g.descricao || "").trim() || campoPreenchido(g.valor)) &&
+      !(String(g.descricao || "").trim() && numero(g.valor) > 0),
+  );
+
+// --- Rascunhos (ficam no aparelho: no celular o WhatsApp sai da página) ---
+const lerRascunhos = () => {
+  try {
+    const salvos = JSON.parse(localStorage.getItem(CHAVE_RASCUNHOS) || "{}");
+    const agora = Date.now();
+    return Object.fromEntries(
+      Object.entries(salvos).filter(
+        ([, r]) => r && agora - r.atualizadoEm < VALIDADE_RASCUNHO_MS,
+      ),
+    );
+  } catch {
+    return {};
+  }
+};
+
+const gravarRascunhos = (rascunhos) => {
+  try {
+    localStorage.setItem(CHAVE_RASCUNHOS, JSON.stringify(rascunhos));
+  } catch {
+    // Sem localStorage (aba anônima etc.) o rascunho vale só até recarregar.
+  }
+};
+
+// O produto vem sugerido sozinho ao abrir a máquina, então não conta pra
+// dizer que a pessoa começou a preencher.
+const rascunhoTemDados = (campos = {}) =>
+  [
+    "contadorIn",
+    "contadorOut",
+    "quantidadeAdicionada",
+    "dinheiroRetirado",
+    "machinePayInicio",
+    "observacao",
+  ].some((c) => campoPreenchido(campos[c])) ||
+  (campos.gastos || []).some(
+    (g) => String(g.descricao || "").trim() || campoPreenchido(g.valor),
+  );
+
+const progressoRascunho = (campos = {}) => {
+  const itens = [
+    { label: "Produto", ok: !!campos.produto_id },
+    { label: "Contador IN", ok: campoPreenchido(campos.contadorIn) },
+    { label: "Contador OUT", ok: campoPreenchido(campos.contadorOut) },
+    { label: "Abastecido", ok: campoPreenchido(campos.quantidadeAdicionada) },
+    { label: "Dinheiro retirado", ok: campoPreenchido(campos.dinheiroRetirado) },
+  ];
+  const feitos = itens.filter((i) => i.ok).length;
+  return {
+    feitos,
+    total: itens.length,
+    faltando: itens.filter((i) => !i.ok).map((i) => i.label),
+  };
+};
+
+// --- WhatsApp ---
+// Em celular navega a própria aba (aba aberta "em branco" fica presa em
+// about:blank em vários Android). Em desktop abre a aba já no clique, senão o
+// navegador bloqueia (o envio só acontece depois de chamar a API).
 const ehDispositivoMovel = () =>
   /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent || "");
 
@@ -58,15 +162,12 @@ function abrirJanelaWhatsapp() {
   }
 }
 
-// Navega pra URL do WhatsApp usando a janela pré-aberta (desktop) ou a
-// própria aba (celular). Ver abrirJanelaWhatsapp() acima pro porquê.
 function navegarParaWhatsapp(janelaPreAberta, url) {
   if (ehDispositivoMovel()) {
     if (janelaPreAberta && !janelaPreAberta.closed) janelaPreAberta.close();
     window.location.href = url;
     return;
   }
-
   if (janelaPreAberta && !janelaPreAberta.closed) {
     janelaPreAberta.location.href = url;
   } else {
@@ -74,1568 +175,843 @@ function navegarParaWhatsapp(janelaPreAberta, url) {
   }
 }
 
-// Nome da origem dos pagamentos usada na sugestão de Total Pré
-// (/movimentacoes/sugestao-total-pre devolve "machinePay", "compactPay" ou
-// "ambos" quando a máquina tem os dois IDs).
-const nomeFontePagamento = (fonte) =>
-  fonte === "ambos"
-    ? "Machine Pay + CompactPay"
-    : fonte === "compactPay"
-      ? "CompactPay"
-      : "Machine Pay";
+// api.whatsapp.com/send e não wa.me: o redirecionamento do wa.me troca os
+// emojis da mensagem por "�".
+const urlWhatsapp = (mensagem) =>
+  `https://api.whatsapp.com/send?text=${encodeURIComponent(mensagem)}`;
+
+async function compartilharOuAbrir({ mensagem, foto, janela, onAvisoFoto }) {
+  if (
+    foto &&
+    navigator.canShare &&
+    navigator.share &&
+    navigator.canShare({ files: [foto] })
+  ) {
+    try {
+      await navigator.share({
+        title: "Movimentação de Máquina",
+        text: mensagem,
+        files: [foto],
+      });
+      if (janela && !janela.closed) janela.close();
+      return;
+    } catch (err) {
+      if (err?.name === "AbortError") {
+        if (janela && !janela.closed) janela.close();
+        return;
+      }
+      console.error("Erro ao compartilhar foto no WhatsApp:", err);
+    }
+  }
+  if (foto) onAvisoFoto?.();
+  navegarParaWhatsapp(janela, urlWhatsapp(mensagem));
+}
+
+// Status das máquinas de uma loja (quando cada uma foi concluída, quantas
+// manutenções pendentes tem) e as últimas movimentações da loja.
+async function buscarDadosLoja(lojaId) {
+  const desde = new Date(
+    Date.now() - HORAS_MAQUINA_CONCLUIDA * 60 * 60 * 1000,
+  ).toISOString();
+  const [recentesRes, manutRes, historicoRes] = await Promise.allSettled([
+    api.get("/movimentacoes", {
+      params: { lojaId, dataInicio: desde, limite: 500 },
+    }),
+    api.get("/manutencoes"),
+    api.get("/movimentacoes", { params: { lojaId, limite: 30 } }),
+  ]);
+
+  const concluidas = {};
+  if (recentesRes.status === "fulfilled") {
+    for (const mov of recentesRes.value.data || []) {
+      const data = new Date(mov.dataColeta || mov.createdAt);
+      if (!concluidas[mov.maquinaId] || data > concluidas[mov.maquinaId]) {
+        concluidas[mov.maquinaId] = data;
+      }
+    }
+  }
+
+  const manutencoes = {};
+  if (manutRes.status === "fulfilled" && Array.isArray(manutRes.value.data)) {
+    for (const manut of manutRes.value.data) {
+      if (!manut.maquinaId || String(manut.lojaId) !== String(lojaId)) continue;
+      if (String(manut.status || "").toLowerCase() !== "pendente") continue;
+      manutencoes[manut.maquinaId] = (manutencoes[manut.maquinaId] || 0) + 1;
+    }
+  }
+
+  const historico =
+    historicoRes.status === "fulfilled" ? historicoRes.value.data || [] : [];
+
+  return { lojaId, concluidas, manutencoes, historico };
+}
+
+function BarraProgresso({ feitos, total, className = "" }) {
+  const completo = feitos === total;
+  return (
+    <div
+      className={`h-1.5 rounded-full bg-slate-200 overflow-hidden ${className}`}
+    >
+      <div
+        className={`h-full rounded-full transition-all ${completo ? "bg-emerald-500" : "bg-amber-400"}`}
+        style={{ width: `${total ? (feitos / total) * 100 : 0}%` }}
+      />
+    </div>
+  );
+}
+
+function CampoNumero({
+  label,
+  name,
+  value,
+  onChange,
+  placeholder,
+  ajuda,
+  prefixo,
+  step = "1",
+}) {
+  return (
+    <div>
+      <label
+        htmlFor={`campo-${name}`}
+        className="block text-sm font-semibold text-gray-700 mb-1.5"
+      >
+        {label}
+      </label>
+      <div className="relative">
+        {prefixo && (
+          <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm font-semibold text-slate-400">
+            {prefixo}
+          </span>
+        )}
+        <input
+          id={`campo-${name}`}
+          type="number"
+          inputMode={step === "1" ? "numeric" : "decimal"}
+          name={name}
+          value={value}
+          onChange={onChange}
+          min="0"
+          step={step}
+          placeholder={placeholder}
+          className={`input-field ${prefixo ? "pl-10" : ""} ${campoPreenchido(value) ? "border-blue-500 bg-blue-50" : ""}`}
+        />
+      </div>
+      {ajuda && <p className="text-xs text-gray-500 mt-1">{ajuda}</p>}
+    </div>
+  );
+}
+
+function LinhaResumo({ label, valor, forte, tom = "text-slate-800" }) {
+  return (
+    <div
+      className={`flex items-center justify-between gap-3 ${forte ? "border-t border-slate-200 pt-2 mt-1" : ""}`}
+    >
+      <span
+        className={`text-sm ${forte ? "font-bold text-slate-900" : "text-slate-600"}`}
+      >
+        {label}
+      </span>
+      <span
+        className={`tabular-nums ${forte ? "text-lg font-bold" : "font-semibold"} ${tom}`}
+      >
+        {valor}
+      </span>
+    </div>
+  );
+}
 
 export function Movimentacoes() {
   const navigate = useNavigate();
   const location = useLocation();
-  const [modalRegistrarDinheiro, setModalRegistrarDinheiro] = useState(false);
-  const [modalGastoVariavel, setModalGastoVariavel] = useState(false);
   const { usuario } = useAuth();
+  const ehAdmin = usuario?.role === "ADMIN";
 
-  // --- ESTADOS ---
-  const [movimentacoes, setMovimentacoes] = useState([]);
-  const [movimentacoesEstoqueLoja, setMovimentacoesEstoqueLoja] = useState([]);
-
-  // Filtros Estoque Loja
-  const [filtroLojaEstoque, setFiltroLojaEstoque] = useState("");
-  const [filtroDataInicioEstoque, setFiltroDataInicioEstoque] = useState("");
-  const [filtroDataFimEstoque, setFiltroDataFimEstoque] = useState("");
-  const [filtroResponsavelEstoque, setFiltroResponsavelEstoque] = useState("");
-
-  // Ações Estoque Loja
-  const [editandoEstoqueLoja, setEditandoEstoqueLoja] = useState(null);
-  const [excluindoEstoqueLoja, setExcluindoEstoqueLoja] = useState(null);
-
-  // Dados Gerais
   const [maquinas, setMaquinas] = useState([]);
   const [produtos, setProdutos] = useState([]);
   const [lojas, setLojas] = useState([]);
-  const [veiculos, setVeiculos] = useState([]);
-
-  // UI States
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
-  const [showForm, setShowForm] = useState(false);
-  const [salvandoMovimentacao, setSalvandoMovimentacao] = useState(false);
-  const [mostrarConfirmacaoMovimentacao, setMostrarConfirmacaoMovimentacao] =
-    useState(false);
-  const [fotoContadores, setFotoContadores] = useState(null);
-  const [fotoContadoresPreview, setFotoContadoresPreview] = useState("");
-  const [lendoFotoContadores, setLendoFotoContadores] = useState(false);
-  const [resultadoFotoContadores, setResultadoFotoContadores] = useState("");
-  const movimentacaoEmEnvioRef = useRef(false);
-  const [movimentacaoAssistentePendente, setMovimentacaoAssistentePendente] =
-    useState(null);
-  const [alertaOrigemId, setAlertaOrigemId] = useState(null);
-  const [naoVaiRegistrar, setNaoVaiRegistrar] = useState(false);
-  const [mostrarObsAlerta, setMostrarObsAlerta] = useState(false);
-  const [obsAlerta, setObsAlerta] = useState("");
-  const [enviandoAlerta, setEnviandoAlerta] = useState(false);
-  const [temMensagemSalva, setTemMensagemSalva] = useState(
-    () => !!localStorage.getItem(CHAVE_ULTIMA_MENSAGEM_WHATSAPP),
-  );
 
-  // Filtros Movimentações
-  const [filtroLojaForm, setFiltroLojaForm] = useState("");
-  const [filtroLojaListagem, setFiltroLojaListagem] = useState("");
+  const [filtroLoja, setFiltroLoja] = useState("");
+  const [dadosLoja, setDadosLoja] = useState(null);
+  const [atualizacaoLoja, setAtualizacaoLoja] = useState(0);
 
-  // Edição
-  const [editandoMovimentacao, setEditandoMovimentacao] = useState(null);
-  const [formEdicao, setFormEdicao] = useState({
-    fichas: "",
-    abastecidas: "",
-    quantidade_notas_entrada: "",
-    valor_entrada_maquininha_pix: "",
+  const [formData, setFormData] = useState(FORMULARIO_VAZIO);
+  const [rascunhos, setRascunhos] = useState(lerRascunhos);
+  // Resumo da máquina aberta (última movimentação + Machine Pay do período),
+  // guardado pela chave "máquina|início".
+  const [resumos, setResumos] = useState({});
+  const [produtoSugeridoId, setProdutoSugeridoId] = useState({});
+  const [confirmacaoContadores, setConfirmacaoContadores] = useState(false);
+  const [mostrarConfirmacao, setMostrarConfirmacao] = useState(false);
+  const [salvando, setSalvando] = useState(false);
+  const envioEmAndamentoRef = useRef(false);
+  const [alertaOrigem, setAlertaOrigem] = useState(null);
+  const [excluindo, setExcluindo] = useState(null);
+
+  // Foto dos contadores (lida pela IA). Por máquina, só em memória.
+  const fotosRef = useRef({});
+  const [foto, setFoto] = useState(null);
+  const [fotoPreview, setFotoPreview] = useState("");
+  const [lendoFoto, setLendoFoto] = useState(false);
+  const [resultadoFoto, setResultadoFoto] = useState("");
+
+  const [temMensagemSalva, setTemMensagemSalva] = useState(() => {
+    try {
+      return !!localStorage.getItem(CHAVE_ULTIMA_MENSAGEM_WHATSAPP);
+    } catch {
+      return false;
+    }
   });
 
-  // Formulário Nova Movimentação
-  const [formData, setFormData] = useState({
-    maquina_id: "",
-    produto_id: "",
-    quantidadeAtualMaquina: "",
-    quantidadeAdicionada: "",
-    fichas: "",
-    contadorIn: "",
-    contadorOut: "",
-    quantidade_notas_entrada: "",
-    valor_entrada_maquininha_pix: "",
-    observacao: "",
-    retiradaEstoque: false,
-    retiradaProduto: 0,
-    ignoreInOut: false,
+  // Vindo de um alerta (Manutenções → "Lançar movimentação"): abre a máquina
+  // já preenchida.
+  const [alertaInicial] = useState(() => {
+    const state = location.state || {};
+    const params = new URLSearchParams(location.search);
+    const abrir =
+      state.abrirFormulario === true ||
+      params.get("abrirFormulario") === "true";
+    return abrir && state.maquinaId ? state : null;
   });
 
-  // Estados auxiliares
-  const [estoqueAnterior, setEstoqueAnterior] = useState(0);
-  const [saidasCompactPay, setSaidasCompactPay] = useState(null);
-  const [alertaDivergencia, setAlertaDivergencia] = useState(null);
-  // Sugestão de Total Pré via Machine Pay (máquinas com desconto automático
-  // ativado), ver useEffect abaixo. modo "auto" trava o campo com o valor
-  // calculado; "forcar_manual" (a cada 15 dias sem conferência manual)
-  // libera o campo pro operador digitar, mas mantém o valor calculado pra
-  // comparação/alerta de divergência.
-  const [sugestaoTotalPreMachinePay, setSugestaoTotalPreMachinePay] =
-    useState(null);
-  const [carregandoSugestaoMachinePay, setCarregandoSugestaoMachinePay] =
-    useState(false);
-  const [
-    confirmacaoDivergenciaMachinePay,
-    setConfirmacaoDivergenciaMachinePay,
-  ] = useState(false);
-
-  // Últimos contadores registrados da máquina selecionada, para detectar
-  // salto suspeito no IN/OUT (ver LIMITE_DIFERENCA_CONTADOR_IN/OUT acima).
-  const [ultimoContadorMaquina, setUltimoContadorMaquina] = useState({
-    contadorIn: null,
-    contadorOut: null,
-  });
-  const [confirmacaoContadorIn, setConfirmacaoContadorIn] = useState(false);
-  const [confirmacaoContadorOut, setConfirmacaoContadorOut] = useState(false);
-
-  // --- EFEITOS ---
+  // --- Dados ---
   useEffect(() => {
-    carregarDados();
-    carregarMovimentacoesEstoqueLoja();
+    let cancelado = false;
+    Promise.all([api.get("/maquinas"), api.get("/produtos"), api.get("/lojas")])
+      .then(([maqRes, prodRes, lojasRes]) => {
+        if (cancelado) return;
+        const listaMaquinas = maqRes.data || [];
+        setMaquinas(listaMaquinas);
+        setProdutos((prodRes.data || []).filter((p) => p.ativo !== false));
+        setLojas(lojasRes.data || []);
+
+        if (alertaInicial) {
+          const maquina = listaMaquinas.find(
+            (m) => String(m.id) === String(alertaInicial.maquinaId),
+          );
+          if (maquina) {
+            const texto = (v) =>
+              v !== undefined && v !== null ? String(v) : "";
+            setFiltroLoja(String(alertaInicial.lojaId || maquina.lojaId || ""));
+            setFormData({
+              ...FORMULARIO_VAZIO,
+              maquina_id: String(maquina.id),
+              produto_id: texto(alertaInicial.produtoId),
+              contadorIn: texto(alertaInicial.contadorIn),
+              contadorOut: texto(alertaInicial.contadorOut),
+              quantidadeAdicionada: texto(alertaInicial.quantidadeAdicionada),
+              observacao: texto(alertaInicial.observacao),
+            });
+            if (alertaInicial.alertaId) {
+              setAlertaOrigem({
+                id: alertaInicial.alertaId,
+                maquinaId: String(maquina.id),
+              });
+            }
+          }
+          navigate(location.pathname, { replace: true, state: null });
+        }
+      })
+      .catch((err) => {
+        console.error("Erro ao carregar dados:", err);
+        if (!cancelado) setError("Erro ao carregar dados iniciais.");
+      })
+      .finally(() => {
+        if (!cancelado) setLoading(false);
+      });
+    return () => {
+      cancelado = true;
+    };
+    // Só na abertura da página.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
-    return () => {
-      if (fotoContadoresPreview) {
-        URL.revokeObjectURL(fotoContadoresPreview);
-      }
-    };
-  }, [fotoContadoresPreview]);
-
-  useEffect(() => {
-    const params = new URLSearchParams(location.search);
-    const state = location.state || {};
-    const deveAbrirFormulario =
-      state.abrirFormulario === true ||
-      state.autoAbrirMovimentacao === true ||
-      params.get("abrirFormulario") === "true";
-    const modo = state.modo || params.get("modo");
-
-    if (!deveAbrirFormulario || modo !== "nova_movimentacao") {
-      return;
-    }
-
-    setMovimentacaoAssistentePendente({
-      lojaId: state.lojaId ?? params.get("lojaId") ?? "",
-      maquinaId: state.maquinaId ?? params.get("maquinaId") ?? "",
-      contadorIn: state.contadorIn ?? params.get("contadorIn") ?? "",
-      contadorOut: state.contadorOut ?? params.get("contadorOut") ?? "",
-      produtoId: state.produtoId ?? params.get("produtoId") ?? "",
-      quantidadeAtualMaquina:
-        state.quantidadeAtualMaquina ??
-        params.get("quantidadeAtualMaquina") ??
-        "",
-      quantidadeAdicionada:
-        state.quantidadeAdicionada ?? params.get("quantidadeAdicionada") ?? "",
-      fichas: state.fichas ?? params.get("fichas") ?? "",
-      quantidade_notas_entrada:
-        state.quantidade_notas_entrada ??
-        params.get("quantidade_notas_entrada") ??
-        "",
-      valor_entrada_maquininha_pix:
-        state.valor_entrada_maquininha_pix ??
-        params.get("valor_entrada_maquininha_pix") ??
-        "",
-      observacao: state.observacao ?? params.get("observacao") ?? "",
-      alertaId: state.alertaId ?? params.get("alertaId") ?? null,
+    if (!filtroLoja) return;
+    let cancelado = false;
+    buscarDadosLoja(filtroLoja).then((dados) => {
+      if (!cancelado) setDadosLoja(dados);
     });
-  }, [location.search, location.state]);
+    return () => {
+      cancelado = true;
+    };
+  }, [filtroLoja, atualizacaoLoja]);
+
+  const maquinaAberta = formData.maquina_id;
+  const chaveResumo = maquinaAberta
+    ? `${maquinaAberta}|${formData.machinePayInicio || ""}`
+    : "";
+
+  // Ao abrir a máquina (ou trocar o início da Machine Pay), busca a última
+  // movimentação e quanto entrou na Machine Pay no período.
+  useEffect(() => {
+    if (!chaveResumo) return;
+    const [maquinaId, inicioLocal] = chaveResumo.split("|");
+    const inicioData = inicioLocal ? new Date(inicioLocal) : null;
+    if (inicioData && Number.isNaN(inicioData.getTime())) return;
+    let cancelado = false;
+    const timer = setTimeout(
+      () => {
+        setResumos((prev) => ({
+          ...prev,
+          [chaveResumo]: { ...(prev[chaveResumo] || {}), carregando: true },
+        }));
+        api
+          .get(`/movimentacoes/resumo-maquina/${maquinaId}`, {
+            params: { inicio: inicioData ? inicioData.toISOString() : undefined },
+          })
+          .then((res) => {
+            if (cancelado) return;
+            setResumos((prev) => ({
+              ...prev,
+              [chaveResumo]: { dados: res.data },
+            }));
+          })
+          .catch((err) => {
+            if (cancelado) return;
+            setResumos((prev) => ({
+              ...prev,
+              [chaveResumo]: {
+                erro:
+                  err.response?.data?.error ||
+                  "Não foi possível buscar os dados da máquina.",
+              },
+            }));
+          });
+      },
+      inicioLocal ? 600 : 0,
+    );
+    return () => {
+      cancelado = true;
+      clearTimeout(timer);
+    };
+  }, [chaveResumo]);
+
+  // Produto da última visita vem pré-selecionado.
+  useEffect(() => {
+    if (!maquinaAberta) return;
+    let cancelado = false;
+    api
+      .get(`/maquinas/${maquinaAberta}/produto-sugerido`)
+      .then((res) => {
+        const produtoId = res.data?.produtoSugerido?.id;
+        if (cancelado || !produtoId) return;
+        setProdutoSugeridoId((prev) => ({
+          ...prev,
+          [maquinaAberta]: String(produtoId),
+        }));
+        setFormData((prev) =>
+          prev.maquina_id === maquinaAberta && !prev.produto_id
+            ? { ...prev, produto_id: String(produtoId) }
+            : prev,
+        );
+      })
+      .catch(() => {
+        // Sem sugestão: nada é pré-selecionado.
+      });
+    return () => {
+      cancelado = true;
+    };
+  }, [maquinaAberta]);
 
   useEffect(() => {
-    if (!movimentacaoAssistentePendente || loading) {
-      return;
-    }
+    return () => {
+      if (fotoPreview) URL.revokeObjectURL(fotoPreview);
+    };
+  }, [fotoPreview]);
 
-    const lojaId = movimentacaoAssistentePendente.lojaId
-      ? String(movimentacaoAssistentePendente.lojaId)
-      : "";
-    const maquinaId = movimentacaoAssistentePendente.maquinaId
-      ? String(movimentacaoAssistentePendente.maquinaId)
-      : "";
-    const contadorIn =
-      movimentacaoAssistentePendente.contadorIn !== undefined &&
-      movimentacaoAssistentePendente.contadorIn !== null
-        ? String(movimentacaoAssistentePendente.contadorIn)
-        : "";
-    const contadorOut =
-      movimentacaoAssistentePendente.contadorOut !== undefined &&
-      movimentacaoAssistentePendente.contadorOut !== null
-        ? String(movimentacaoAssistentePendente.contadorOut)
-        : "";
-    const campoOuVazio = (valor) =>
-      valor !== undefined && valor !== null ? String(valor) : "";
-
-    setShowForm(true);
-    setFiltroLojaForm(lojaId);
-    setFormData((prev) => ({
-      ...prev,
-      maquina_id: maquinaId,
-      produto_id: campoOuVazio(movimentacaoAssistentePendente.produtoId),
-      contadorIn,
-      contadorOut,
-      quantidadeAtualMaquina: campoOuVazio(
-        movimentacaoAssistentePendente.quantidadeAtualMaquina,
-      ),
-      quantidadeAdicionada: campoOuVazio(
-        movimentacaoAssistentePendente.quantidadeAdicionada,
-      ),
-      fichas: campoOuVazio(movimentacaoAssistentePendente.fichas),
-      quantidade_notas_entrada: campoOuVazio(
-        movimentacaoAssistentePendente.quantidade_notas_entrada,
-      ),
-      valor_entrada_maquininha_pix: campoOuVazio(
-        movimentacaoAssistentePendente.valor_entrada_maquininha_pix,
-      ),
-      observacao: campoOuVazio(movimentacaoAssistentePendente.observacao),
-    }));
-    setAlertaOrigemId(movimentacaoAssistentePendente.alertaId || null);
-    setMovimentacaoAssistentePendente(null);
-
-    queueMicrotask(() => {
-      document
-        .getElementById("form-nova-movimentacao")
-        ?.scrollIntoView({ behavior: "smooth", block: "start" });
+  // --- Rascunhos ---
+  const salvarRascunhos = (atualizar) => {
+    setRascunhos((prev) => {
+      const proximo = atualizar(prev);
+      gravarRascunhos(proximo);
+      return proximo;
     });
-  }, [movimentacaoAssistentePendente, loading]);
-
-  // Atualizar estoque anterior quando seleciona máquina
-  useEffect(() => {
-    if (formData.maquina_id) {
-      const maquina = maquinas.find(
-        (m) => String(m.id) === String(formData.maquina_id),
-      );
-      if (maquina) {
-        setEstoqueAnterior(maquina.estoqueAtual || 0);
-      }
-    }
-  }, [formData.maquina_id, maquinas]);
-
-  // Verificar divergência entre contador OUT e total pre informado
-  useEffect(() => {
-    const verificarDivergencia = async () => {
-      // Só verificar se temos máquina selecionada, contador OUT e total pre preenchidos
-      if (
-        !formData.maquina_id ||
-        !formData.contadorOut ||
-        !formData.quantidadeAtualMaquina
-      ) {
-        setAlertaDivergencia(null);
-        return;
-      }
-
-      const contadorOutAtual = parseInt(formData.contadorOut);
-      const totalPreInformado = parseInt(formData.quantidadeAtualMaquina);
-
-      // Validar se são números válidos
-      if (isNaN(contadorOutAtual) || isNaN(totalPreInformado)) {
-        setAlertaDivergencia(null);
-        return;
-      }
-
-      try {
-        // Buscar última movimentação da máquina
-        const response = await api.get(
-          `/movimentacoes?maquinaId=${formData.maquina_id}&limite=1`,
-        );
-        const movimentacoes = response.data;
-
-        if (movimentacoes && movimentacoes.length > 0) {
-          const ultimaMov = movimentacoes[0];
-          const contadorOutAnterior = ultimaMov.contadorOut || 0;
-          const totalPosAnterior = ultimaMov.totalPos || 0;
-
-          // Calcular quantos produtos saíram baseado no contador OUT
-          const saidaCalculada = contadorOutAtual - contadorOutAnterior;
-
-          // Calcular qual deveria ser o total pre esperado
-          const totalPreEsperado = totalPosAnterior - saidaCalculada;
-
-          // Se houver divergência, mostrar alerta
-          const diferenca = Math.abs(totalPreInformado - totalPreEsperado);
-          if (diferenca > 0) {
-            setAlertaDivergencia({
-              totalPreInformado,
-              totalPreEsperado,
-              diferenca,
-              saidaCalculada,
-              totalPosAnterior,
-              contadorOutAnterior,
-              contadorOutAtual,
-            });
-          } else {
-            setAlertaDivergencia(null);
-          }
-        } else {
-          // Não há movimentação anterior, não há como comparar
-          setAlertaDivergencia(null);
-        }
-      } catch (error) {
-        console.error("Erro ao verificar divergência:", error);
-        setAlertaDivergencia(null);
-      }
-    };
-
-    verificarDivergencia();
-  }, [
-    formData.maquina_id,
-    formData.contadorOut,
-    formData.quantidadeAtualMaquina,
-  ]);
-
-  // Busca o último contador IN/OUT registrado da máquina selecionada, para
-  // comparar com o que o operador está digitando agora e detectar salto
-  // suspeito (ver LIMITE_DIFERENCA_CONTADOR_IN/OUT).
-  useEffect(() => {
-    if (!formData.maquina_id) {
-      setUltimoContadorMaquina({ contadorIn: null, contadorOut: null });
-      return;
-    }
-
-    let cancelado = false;
-
-    api
-      .get(`/movimentacoes?maquinaId=${formData.maquina_id}&limite=1`)
-      .then((response) => {
-        if (cancelado) return;
-        const ultimaMov = response.data?.[0];
-        setUltimoContadorMaquina({
-          contadorIn: ultimaMov?.contadorIn ?? null,
-          contadorOut: ultimaMov?.contadorOut ?? null,
-        });
-      })
-      .catch(() => {
-        if (!cancelado) {
-          setUltimoContadorMaquina({ contadorIn: null, contadorOut: null });
-        }
-      });
-
-    return () => {
-      cancelado = true;
-    };
-  }, [formData.maquina_id]);
-
-  // Para máquinas com "desconto automático via Machine Pay" ativado, busca
-  // quanto já entrou na Machine Pay desde a última coleta e calcula o Total
-  // Pré esperado (totalPos anterior menos 1 pulso pra cada
-  // valorDescontoMachinePay recebido). Em modo "auto" trava o campo e
-  // preenche com o valor calculado; a cada 15 dias sem conferência manual o
-  // backend devolve modo "forcar_manual" — aí o campo fica liberado pro
-  // operador contar fisicamente, e o valor calculado só serve pra comparar
-  // e alertar se o que ele digitou não bater (ver alertaSubmit mais abaixo).
-  useEffect(() => {
-    setSugestaoTotalPreMachinePay(null);
-    setCarregandoSugestaoMachinePay(false);
-
-    if (!formData.maquina_id) return;
-
-    const maquina = maquinas.find(
-      (m) => String(m.id) === String(formData.maquina_id),
-    );
-    if (!maquina?.descontoAutomaticoMachinePay) return;
-
-    let cancelado = false;
-    setCarregandoSugestaoMachinePay(true);
-
-    api
-      .get(`/movimentacoes/sugestao-total-pre/${formData.maquina_id}`)
-      .then((response) => {
-        if (cancelado) return;
-        const dados = response.data;
-        setSugestaoTotalPreMachinePay(dados || null);
-
-        if (dados?.sugestaoDisponivel && dados.modo === "auto") {
-          setFormData((prev) => ({
-            ...prev,
-            quantidadeAtualMaquina: String(dados.sugestaoTotalPre),
-          }));
-        }
-      })
-      .catch(() => {
-        if (!cancelado) setSugestaoTotalPreMachinePay(null);
-      })
-      .finally(() => {
-        if (!cancelado) setCarregandoSugestaoMachinePay(false);
-      });
-
-    return () => {
-      cancelado = true;
-    };
-  }, [formData.maquina_id, maquinas]);
-
-  // Só admin: prêmios que o sensor de saída da placa CompactPay contou desde
-  // a última movimentação (o "Prêmios entregues" do painel CompactPay no
-  // período entre movimentações). Funcionário não vê pra não copiar o número.
-  useEffect(() => {
-    setSaidasCompactPay(null);
-    if (!formData.maquina_id || usuario?.role !== "ADMIN") return;
-
-    const maquina = maquinas.find(
-      (m) => String(m.id) === String(formData.maquina_id),
-    );
-    if (!maquina?.compactPayId || !maquina?.conferirSaidaCompactPay) return;
-
-    let cancelado = false;
-    setSaidasCompactPay({ carregando: true });
-    api
-      .get(`/movimentacoes/saidas-compactpay/${formData.maquina_id}`)
-      .then((response) => {
-        if (!cancelado) setSaidasCompactPay(response.data || null);
-      })
-      .catch(() => {
-        if (!cancelado) setSaidasCompactPay({ erro: true });
-      });
-
-    return () => {
-      cancelado = true;
-    };
-  }, [formData.maquina_id, maquinas, usuario?.role]);
-
-  // Cada vez que o operador muda o valor digitado, a confirmação de
-  // "certeza que está correto" anterior deixa de valer.
-  useEffect(() => {
-    setConfirmacaoContadorIn(false);
-  }, [formData.contadorIn, formData.maquina_id]);
-
-  useEffect(() => {
-    setConfirmacaoContadorOut(false);
-  }, [formData.contadorOut, formData.maquina_id]);
-
-  useEffect(() => {
-    setConfirmacaoDivergenciaMachinePay(false);
-  }, [formData.quantidadeAtualMaquina, formData.maquina_id]);
-
-  // Sugere produto automaticamente ao escolher máquina, mas permite troca manual
-  // Sugere produto via backend ao escolher máquina
-  useEffect(() => {
-    if (!formData.maquina_id) return;
-    if (formData.produto_id) return;
-    // Busca produto sugerido do backend
-    const fetchProdutoSugerido = async () => {
-      try {
-        const res = await api.get(
-          `/maquinas/${formData.maquina_id}/produto-sugerido`,
-        );
-        if (
-          res.data &&
-          res.data.produtoSugerido &&
-          res.data.produtoSugerido.id
-        ) {
-          setFormData((prev) => ({
-            ...prev,
-            produto_id: res.data.produtoSugerido.id,
-          }));
-        }
-      } catch {
-        // Silencia erro, não sugere nada
-      }
-    };
-    fetchProdutoSugerido();
-  }, [formData.maquina_id, formData.produto_id]);
-
-  // --- FUNÇÕES DE CARREGAMENTO ---
-  const carregarDados = async () => {
-    try {
-      setLoading(true);
-      const [movRes, maqRes, prodRes, lojasRes, veiculosRes] =
-        await Promise.all([
-          api.get("/movimentacoes"),
-          api.get("/maquinas"),
-          api.get("/produtos"),
-          api.get("/lojas"),
-          api.get("/veiculos"),
-        ]);
-
-      setMovimentacoes(movRes.data || []);
-      setMaquinas(maqRes.data || []);
-      setProdutos(prodRes.data || []);
-      setLojas(lojasRes.data || []);
-      setVeiculos(veiculosRes.data || []);
-    } catch (err) {
-      console.error("Erro ao carregar dados:", err);
-      setError("Erro ao carregar dados iniciais.");
-    } finally {
-      setLoading(false);
-    }
   };
 
-  const carregarMovimentacoesEstoqueLoja = async () => {
-    try {
-      const res = await api.get("/movimentacao-estoque-loja");
-      setMovimentacoesEstoqueLoja(res.data || []);
-    } catch (error) {
-      console.error(
-        "Erro ao carregar movimentações de estoque de loja:",
-        error,
+  const guardarRascunho = (campos) => {
+    const maquinaId = campos.maquina_id;
+    if (!maquinaId) return;
+    salvarRascunhos((prev) => {
+      if (!rascunhoTemDados(campos)) {
+        if (!prev[maquinaId]) return prev;
+        const { [maquinaId]: _removido, ...resto } = prev;
+        return resto;
+      }
+      const dados = Object.fromEntries(
+        CAMPOS_RASCUNHO.map((c) => [c, campos[c]]),
       );
-      setMovimentacoesEstoqueLoja([]);
-    }
+      return { ...prev, [maquinaId]: { ...dados, atualizadoEm: Date.now() } };
+    });
   };
 
-  // --- HANDLERS ---
-  const handleChange = (e) => {
-    const { name, value, type, checked } = e.target;
-    setFormData((prev) => ({
-      ...prev,
-      [name]: type === "checkbox" ? checked : value,
-    }));
-    // Limpar mensagens de erro/sucesso ao editar
+  const descartarRascunho = (maquinaId) => {
+    if (!maquinaId) return;
+    delete fotosRef.current[maquinaId];
+    salvarRascunhos((prev) => {
+      const { [maquinaId]: _removido, ...resto } = prev;
+      return resto;
+    });
+  };
+
+  const atualizarCampos = (patch) => {
+    const proximo = { ...formData, ...patch };
+    setFormData(proximo);
+    guardarRascunho(proximo);
+    if ("contadorIn" in patch || "contadorOut" in patch) {
+      setConfirmacaoContadores(false);
+    }
     if (error) setError("");
     if (success) setSuccess("");
   };
 
-  const limparFotoContadores = () => {
-    if (fotoContadoresPreview) {
-      URL.revokeObjectURL(fotoContadoresPreview);
-    }
-    setFotoContadores(null);
-    setFotoContadoresPreview("");
-    setResultadoFotoContadores("");
+  const handleChange = (e) =>
+    atualizarCampos({ [e.target.name]: e.target.value });
+
+  // --- Foto dos contadores (IA) ---
+  const trocarFoto = (arquivo, resultado = "") => {
+    if (fotoPreview) URL.revokeObjectURL(fotoPreview);
+    setFoto(arquivo);
+    setFotoPreview(arquivo ? URL.createObjectURL(arquivo) : "");
+    setResultadoFoto(resultado);
   };
 
   const prepararImagemParaEnvioIa = (file) =>
     new Promise((resolve, reject) => {
       const image = new Image();
       const objectUrl = URL.createObjectURL(file);
-
       image.onload = () => {
         const maxSize = 900;
-        const escala = Math.min(1, maxSize / Math.max(image.width, image.height));
+        const escala = Math.min(
+          1,
+          maxSize / Math.max(image.width, image.height),
+        );
         const canvas = document.createElement("canvas");
         canvas.width = Math.max(1, Math.round(image.width * escala));
         canvas.height = Math.max(1, Math.round(image.height * escala));
-
-        const ctx = canvas.getContext("2d");
-        ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
-
+        canvas
+          .getContext("2d")
+          .drawImage(image, 0, 0, canvas.width, canvas.height);
         URL.revokeObjectURL(objectUrl);
         resolve(canvas.toDataURL("image/jpeg", 0.62));
       };
-
       image.onerror = () => {
         URL.revokeObjectURL(objectUrl);
-        reject(new Error("Nao foi possivel ler a imagem."));
+        reject(new Error("Não foi possível ler a imagem."));
       };
-
       image.src = objectUrl;
     });
 
   const handleFotoContadores = async (e) => {
     const file = e.target.files?.[0];
+    e.target.value = "";
     if (!file) return;
-
     if (!file.type.startsWith("image/")) {
-      setResultadoFotoContadores("Selecione uma imagem valida.");
+      setResultadoFoto("Selecione uma imagem válida.");
       return;
     }
-
-    if (fotoContadoresPreview) {
-      URL.revokeObjectURL(fotoContadoresPreview);
-    }
-
-    setFotoContadores(file);
-    setFotoContadoresPreview(URL.createObjectURL(file));
-    setLendoFotoContadores(true);
-    setResultadoFotoContadores("IA lendo os contadores...");
-    setError("");
-    setSuccess("");
-
+    const maquinaDaFoto = formData.maquina_id;
+    trocarFoto(file, "Lendo os contadores...");
+    setLendoFoto(true);
     try {
       const dataUrl = await prepararImagemParaEnvioIa(file);
       const [meta, imagemBase64] = dataUrl.split(",");
       const mimeType = meta.match(/^data:(.*);base64$/)?.[1] || "image/jpeg";
-      const tamanhoEstimadoBytes = Math.ceil((imagemBase64.length * 3) / 4);
-
-      if (tamanhoEstimadoBytes > 2 * 1024 * 1024) {
-        setResultadoFotoContadores(
-          "A foto ficou grande demais para enviar. Tente tirar mais perto dos contadores ou com menos area ao redor.",
-        );
-        return;
-      }
-
       const response = await api.post("/assistente-ia/ler-contadores", {
         imagemBase64,
         mimeType,
       });
-      const { contadorIn, contadorOut, confianca, observacao } = response.data || {};
-
+      const { contadorIn, contadorOut, confianca, observacao } =
+        response.data || {};
       if (!contadorIn || !contadorOut || confianca === "baixa") {
-        setResultadoFotoContadores(
+        setResultadoFoto(
           observacao ||
-            "A IA não teve certeza dos dois contadores. Preencha manualmente ou tire outra foto mais perto e reta.",
+            "A IA não teve certeza dos dois contadores. Preencha à mão ou tire outra foto mais perto e reta.",
         );
         return;
       }
-
-      setFormData((prev) => ({
-        ...prev,
-        contadorIn: String(contadorIn),
-        contadorOut: String(contadorOut),
-        ignoreInOut: false,
-      }));
-      setResultadoFotoContadores(
-        `A IA leu: IN ${contadorIn} e OUT ${contadorOut}. Confira antes de salvar.`,
+      setFormData((prev) => {
+        if (prev.maquina_id !== maquinaDaFoto) return prev;
+        const proximo = {
+          ...prev,
+          contadorIn: String(contadorIn),
+          contadorOut: String(contadorOut),
+        };
+        guardarRascunho(proximo);
+        return proximo;
+      });
+      setConfirmacaoContadores(false);
+      setResultadoFoto(
+        `A IA leu: IN ${contadorIn} e OUT ${contadorOut}. Confira antes de registrar.`,
       );
     } catch (err) {
-      console.error("Erro ao ler foto dos contadores com IA:", err);
       const erroApi = err.response?.data?.message || err.response?.data?.error;
-      const mensagemErro =
+      setResultadoFoto(
         typeof erroApi === "string"
           ? erroApi
-          : erroApi
-            ? JSON.stringify(erroApi)
-            : "Nao foi possivel ler a foto com IA. Preencha manualmente ou tente novamente.";
-      setResultadoFotoContadores(mensagemErro);
+          : "Não foi possível ler a foto com IA. Preencha à mão ou tente de novo.",
+      );
     } finally {
-      setLendoFotoContadores(false);
-      e.target.value = "";
+      setLendoFoto(false);
     }
   };
 
-  const obterEstoqueDisponivelProdutoLoja = async (lojaId, produtoId) => {
-    if (!lojaId || !produtoId) return 0;
-
-    try {
-      const response = await api.get(`/estoque-lojas/${lojaId}`);
-      const itensEstoque = response.data || [];
-      const estoqueProduto = itensEstoque.find(
-        (item) =>
-          item.produtoId === produtoId || item.produto?.id === produtoId,
-      );
-
-      return Number(estoqueProduto?.quantidade || 0);
-    } catch (err) {
-      console.error("Erro ao consultar estoque da loja:", err);
-      throw new Error("Não foi possível validar o estoque da loja.");
-    }
-  };
-
-  // --- CORREÇÃO AQUI: Função handleSubmit recriada com o TRY ---
-  const handleSubmit = (e) => {
-    e.preventDefault();
-
-    if (divergenciaMachinePaySuspeita && !confirmacaoDivergenciaMachinePay) {
-      setError(
-        `O valor esperado pela ${nomeFontePagamento(sugestaoTotalPreMachinePay?.fonte)} é diferente do que foi digitado. Reconte a máquina, ou marque a confirmação de que já recontou e o valor está correto.`,
-      );
-      return;
+  // --- Abrir / fechar máquina ---
+  const selecionarMaquina = (maquinaId) => {
+    if (lendoFoto) return;
+    const atual = formData.maquina_id;
+    if (atual) {
+      if (foto) fotosRef.current[atual] = { foto, resultado: resultadoFoto };
+      else delete fotosRef.current[atual];
     }
 
-    if (contadorInSuspeito && !confirmacaoContadorIn) {
-      setError(
-        "A diferença do Contador IN em relação ao último registro é muito grande (provável erro de leitura). Marque a confirmação de que o valor está correto antes de registrar.",
-      );
-      return;
-    }
-
-    if (contadorOutSuspeito && !confirmacaoContadorOut) {
-      setError(
-        "A diferença do Contador OUT em relação ao último registro é muito grande (provável erro de leitura). Marque a confirmação de que o valor está correto antes de registrar.",
-      );
-      return;
-    }
-
-    setMostrarConfirmacaoMovimentacao(true);
-  };
-
-  const confirmarRegistroMovimentacao = async () => {
-    if (movimentacaoEmEnvioRef.current) {
-      return;
-    }
-
-    // Precisa ser aberta aqui, de forma síncrona, para não ser bloqueada
-    // pelo Safari/iOS quando o envio ao WhatsApp acontecer mais tarde.
-    const janelaWhatsapp = abrirJanelaWhatsapp();
-    let janelaWhatsappUsada = false;
-
-    movimentacaoEmEnvioRef.current = true;
-    setSalvandoMovimentacao(true);
+    const abrindo = atual === maquinaId ? "" : maquinaId;
+    const { atualizadoEm: _atualizadoEm, ...campos } =
+      (abrindo && rascunhos[abrindo]) || {};
+    const fotoSalva = abrindo ? fotosRef.current[abrindo] : null;
+    trocarFoto(fotoSalva?.foto || null, fotoSalva?.resultado || "");
+    setConfirmacaoContadores(false);
     setError("");
-    setSuccess("");
+    setFormData({ ...FORMULARIO_VAZIO, ...campos, maquina_id: abrindo });
 
-    try {
-      const quantidadeAdicionada = parseInt(formData.quantidadeAdicionada) || 0;
-
-      if (quantidadeAdicionada > 0) {
-        const estoqueDisponivel = await obterEstoqueDisponivelProdutoLoja(
-          filtroLojaForm,
-          formData.produto_id,
-        );
-
-        if (quantidadeAdicionada > estoqueDisponivel) {
-          const produtoSelecionado = produtos.find(
-            (p) => p.id === formData.produto_id,
-          );
-          setError(
-            `Não há estoque suficiente na loja para abastecer ${produtoSelecionado?.nome || "este produto"}. Disponível: ${estoqueDisponivel}, solicitado: ${quantidadeAdicionada}.`,
-          );
-          return;
-        }
-      }
-
-      setSalvandoMovimentacao(true);
-
-      // Converter valores do formulário
-      const totalPre = parseInt(formData.quantidadeAtualMaquina) || 0; // valor digitado pelo usuário
-      const fichas = parseInt(formData.fichas) || 0;
-
-      // totalPos = totalPre + abastecidas - retiradaProduto
-      const retiradaProduto = parseInt(formData.retiradaProduto) || 0;
-      const totalPos = totalPre + quantidadeAdicionada - retiradaProduto;
-
-      // Buscar a última movimentação da máquina selecionada para pegar o totalPos anterior
-      let ultimoTotalPos = 0;
-      let movimentacoesMaquina = movimentacoes
-        .filter((m) => {
-          // Considera tanto maquinaId quanto maquina_id
-          return (
-            m.maquinaId === formData.maquina_id ||
-            m.maquina_id === formData.maquina_id
-          );
-        })
-        .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-
-      if (movimentacoesMaquina.length > 0) {
-        ultimoTotalPos =
-          movimentacoesMaquina[0].totalPos ||
-          movimentacoesMaquina[0].totalPos ||
-          0;
-      }
-
-      // sairam = totalPos da movimentação anterior - totalPre da atual
-      // retiradaProduto NÃO conta em quantidadeSaiu nem no financeiro
-      const quantidadeSaiu = Math.max(0, ultimoTotalPos - totalPre);
-
-      console.log("📊 [handleSubmit] Cálculos da movimentação:");
-      console.log("   📌 totalPos anterior:", ultimoTotalPos);
-      console.log("   📌 Quantidade atual informada (totalPre):", totalPre);
-      console.log(
-        "   📌 Quantidade adicionada (abastecidas):",
-        quantidadeAdicionada,
-      );
-      console.log("   📌 Calculado que saiu (sairam):", quantidadeSaiu);
-      console.log("   📌 Novo total (totalPos):", totalPos);
-
-      // Preparar observação
-      let observacaoFinal = formData.observacao?.trim() || "";
-      if (formData.retiradaEstoque) {
-        const notaRetirada = "⚠️ RETIRADA DE ESTOQUE - NÃO É VENDA";
-        observacaoFinal = observacaoFinal
-          ? `${notaRetirada}. ${observacaoFinal}`
-          : notaRetirada;
-      }
-
-      // Transformar para o formato do backend
-      const data = {
-        maquinaId: formData.maquina_id,
-        totalPre: totalPre,
-        sairam: quantidadeSaiu,
-        abastecidas: quantidadeAdicionada,
-        totalPos: totalPos,
-        fichas: fichas,
-        contadorIn: parseInt(formData.contadorIn) || null,
-        contadorOut: parseInt(formData.contadorOut) || null,
-        quantidade_notas_entrada: formData.quantidade_notas_entrada
-          ? parseFloat(formData.quantidade_notas_entrada)
-          : null,
-        valor_entrada_maquininha_pix: formData.valor_entrada_maquininha_pix
-          ? parseFloat(formData.valor_entrada_maquininha_pix)
-          : null,
-        retiradaEstoque: formData.retiradaEstoque,
-        contadorMaquina: null,
-        observacoes: observacaoFinal || null,
-        origemTotalPre: sugestaoTotalPreMachinePay?.sugestaoDisponivel
-          ? sugestaoTotalPreMachinePay.modo === "auto"
-            ? "automatico"
-            : "manual"
-          : null,
-        produtos: [
-          {
-            produtoId: formData.produto_id,
-            quantidadeSaiu: quantidadeSaiu,
-            quantidadeAbastecida: quantidadeAdicionada,
-            retiradaProduto: retiradaProduto,
-            // Transformar para o formato do backend (atualizado)
-          },
-        ],
-      };
-
-      await api.post("/movimentacoes", data);
-
-      // Conferência manual (a cada 15 dias) confirmada mesmo com divergência
-      // em relação ao esperado pela Machine Pay: avisa o admin com os
-      // números pra ele investigar (erro de contagem, pulso perdido, etc).
-      if (divergenciaMachinePaySuspeita && confirmacaoDivergenciaMachinePay) {
-        try {
-          const esperado = sugestaoTotalPreMachinePay.sugestaoTotalPre;
-          const diferenca = totalPre - esperado;
-          await api.post("/alertas-movimentacao", {
-            maquinaId: formData.maquina_id,
-            observacao:
-              `Divergência na conferência manual da ${nomeFontePagamento(sugestaoTotalPreMachinePay.fonte)}: era pra ter ${esperado} ` +
-              `(calculado com base em R$ ${sugestaoTotalPreMachinePay.totalRecebidoDesdeUltimaMovimentacao.toFixed(2)} ` +
-              `recebidos na ${nomeFontePagamento(sugestaoTotalPreMachinePay.fonte)} desde a movimentação anterior ÷ R$ ${Number(sugestaoTotalPreMachinePay.valorDesconto).toFixed(2)} por pulso ` +
-              `= ${sugestaoTotalPreMachinePay.pulsos} pulso(s)), mas o operador registrou ${totalPre} ` +
-              `mesmo após o aviso de recontagem. Diferença: ${diferenca > 0 ? "+" : ""}${diferenca}.`,
-            dadosAbastecimento: {
-              esperado,
-              informado: totalPre,
-              diferenca,
-              totalRecebidoMachinePay:
-                sugestaoTotalPreMachinePay.totalRecebidoDesdeUltimaMovimentacao,
-              pulsos: sugestaoTotalPreMachinePay.pulsos,
-              valorDesconto: sugestaoTotalPreMachinePay.valorDesconto,
-            },
-          });
-        } catch (erroAlertaDivergencia) {
-          console.error(
-            "Erro ao registrar alerta de divergência da Machine Pay:",
-            erroAlertaDivergencia,
-          );
-        }
-      }
-
-      if (alertaOrigemId) {
-        try {
-          await api.patch(`/alertas-movimentacao/${alertaOrigemId}/resolver`);
-        } catch (erroResolverAlerta) {
-          console.error(
-            "Erro ao resolver alerta de movimentação de origem:",
-            erroResolverAlerta,
-          );
-        }
-        setAlertaOrigemId(null);
-      }
-
-      // Movimentação registrada com sucesso: envia automaticamente para o WhatsApp
-      await enviarParaWhatsapp(janelaWhatsapp);
-      janelaWhatsappUsada = true;
-      resetFluxoWhatsappBypass();
-
-      // Devolver retirada para o estoque da loja, se marcado
-      if (
-        formData.retiradaProdutoDevolverEstoque &&
-        retiradaProduto > 0 &&
-        formData.produto_id &&
-        formData.maquina_id
-      ) {
-        // Encontrar a loja da máquina selecionada
-        const maquinaSelecionada = maquinas.find(
-          (m) => m.id === formData.maquina_id,
-        );
-        const lojaId = maquinaSelecionada ? maquinaSelecionada.lojaId : null;
-        if (lojaId) {
-          await api.post("/movimentacao-estoque-loja", {
-            lojaId,
-            produtos: [
-              {
-                produtoId: formData.produto_id,
-                quantidade: retiradaProduto,
-                tipoMovimentacao: "entrada",
-              },
-            ],
-            usuarioId: usuario.id,
-            observacao:
-              "Devolução automática de retirada de produto da máquina",
-          });
-        }
-      }
-
-      // Logs para depuração do filtro
-      console.log("Todas movimentações:", movimentacoes);
-      console.log(
-        "ID da máquina selecionada:",
-        formData.maquina_id,
-        "(tipo:",
-        typeof formData.maquina_id,
-        ")",
-      );
-      movimentacoesMaquina = movimentacoes
-        .filter((m) => {
-          const id1 = m.maquinaId !== undefined ? m.maquinaId : m.maquina_id;
-          console.log(
-            "Comparando:",
-            id1,
-            "(tipo:",
-            typeof id1,
-            ") com",
-            formData.retiradaProdutoDevolverEstoque === true,
-            "(tipo:",
-            typeof formData.maquina_id,
-            ")",
-          );
-          return id1 === formData.maquina_id;
-        })
-        .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-      console.log("Movimentações filtradas:", movimentacoesMaquina);
-      ultimoTotalPos = 0;
-      if (movimentacoesMaquina.length > 0) {
-        ultimoTotalPos = movimentacoesMaquina[0].totalPos || 0;
-      }
-      console.log("Último totalPos encontrado:", ultimoTotalPos);
-
-      setFormData({
-        maquina_id: "",
-        produto_id: "",
-        quantidadeAtualMaquina: "",
-        quantidadeAdicionada: "",
-        fichas: "",
-        contadorIn: "",
-        contadorOut: "",
-        quantidade_notas_entrada: "",
-        valor_entrada_maquininha_pix: "",
-        observacao: "",
-        retiradaEstoque: false,
-        retiradaProduto: 0,
-        ignoreInOut: false,
-      });
-      limparFotoContadores();
-      setEstoqueAnterior(0);
-      setFiltroLojaForm("");
-      setShowForm(false);
-
-      // Recarregar dados
-      carregarDados();
-    } catch (error) {
-      console.error("❌ [handleSubmit] Erro:", error);
-      setError(
-        error.response?.data?.error ||
-          error.response?.data?.message ||
-          "Erro ao registrar movimentação",
-      );
-    } finally {
-      if (janelaWhatsapp && !janelaWhatsappUsada && !janelaWhatsapp.closed) {
-        janelaWhatsapp.close();
-      }
-      movimentacaoEmEnvioRef.current = false;
-      setSalvandoMovimentacao(false);
+    if (abrindo) {
+      setTimeout(() => {
+        document
+          .getElementById(`maquina-${abrindo}`)
+          ?.scrollIntoView({ behavior: "smooth", block: "start" });
+      }, 0);
     }
   };
 
-  const iniciarEdicao = (movimentacao) => {
-    setEditandoMovimentacao(movimentacao);
-    setFormEdicao({
-      fichas: movimentacao.fichas || 0,
-      abastecidas: movimentacao.abastecidas || 0,
-      quantidade_notas_entrada: movimentacao.quantidade_notas_entrada || "",
-      valor_entrada_maquininha_pix:
-        movimentacao.valor_entrada_maquininha_pix || "",
+  const limparCamposMaquina = () => {
+    trocarFoto(null);
+    setFormData({ ...FORMULARIO_VAZIO, maquina_id: formData.maquina_id });
+    setConfirmacaoContadores(false);
+    descartarRascunho(formData.maquina_id);
+  };
+
+  // --- Gastos extras ---
+  const adicionarGasto = () =>
+    atualizarCampos({
+      gastos: [...(formData.gastos || []), { descricao: "", valor: "" }],
     });
-  };
-
-  const cancelarEdicao = () => {
-    setEditandoMovimentacao(null);
-    setFormEdicao({
-      fichas: "",
-      abastecidas: "",
-      quantidade_notas_entrada: "",
-      valor_entrada_maquininha_pix: "",
+  const alterarGasto = (indice, campo, valor) =>
+    atualizarCampos({
+      gastos: formData.gastos.map((g, i) =>
+        i === indice ? { ...g, [campo]: valor } : g,
+      ),
     });
-  };
-
-  const salvarEdicao = async () => {
-    try {
-      await api.put(`/movimentacoes/${editandoMovimentacao.id}`, {
-        fichas: parseInt(formEdicao.fichas) || 0,
-        abastecidas: parseInt(formEdicao.abastecidas) || 0,
-        quantidade_notas_entrada:
-          formEdicao.quantidade_notas_entrada !== ""
-            ? parseFloat(formEdicao.quantidade_notas_entrada)
-            : null,
-        valor_entrada_maquininha_pix:
-          formEdicao.valor_entrada_maquininha_pix !== ""
-            ? parseFloat(formEdicao.valor_entrada_maquininha_pix)
-            : null,
-      });
-      setSuccess("Movimentação atualizada com sucesso!");
-      cancelarEdicao();
-      carregarDados();
-    } catch (error) {
-      console.error("Erro ao atualizar:", error);
-      setError("Erro ao atualizar movimentação");
-    }
-  };
-  const confirmarExclusaoLoja = async () => {
-    if (!excluindoEstoqueLoja) return;
-
-    try {
-      await api.delete(`/movimentacao-estoque-loja/${excluindoEstoqueLoja.id}`);
-      setSuccess("Movimentação de estoque de loja excluída com sucesso!");
-      carregarMovimentacoesEstoqueLoja(); // Recarrega a lista
-    } catch (err) {
-      console.error("Erro ao excluir:", err);
-      setError("Erro ao excluir movimentação de loja.");
-    } finally {
-      setExcluindoEstoqueLoja(null); // Fecha o modal
-    }
-  };
-
-  // Função para salvar edição de loja (Exemplo editando o Responsável)
-  const salvarEdicaoLoja = async (e) => {
-    e.preventDefault();
-    if (!editandoEstoqueLoja) return;
-
-    try {
-      await api.put(`/movimentacao-estoque-loja/${editandoEstoqueLoja.id}`, {
-        lojaId: editandoEstoqueLoja.loja?.id || editandoEstoqueLoja.lojaId,
-        usuarioId: usuario.id,
-        produtos: editandoEstoqueLoja.produtosEnviados.map((p) => ({
-          produtoId: p.produto?.id || p.produtoId,
-          quantidade: Number(p.quantidade),
-          tipoMovimentacao: p.tipoMovimentacao || "saida",
-        })),
-      });
-
-      setSuccess("Movimentação de loja atualizada!");
-      carregarMovimentacoesEstoqueLoja();
-      if (typeof carregarDados === "function") carregarDados();
-      setEditandoEstoqueLoja(null);
-    } catch (err) {
-      console.error("Erro ao editar:", err);
-      setError("Erro ao atualizar movimentação de loja.");
-    }
-  };
-
-  // --- WHATSAPP ---
-  const enviarParaWhatsapp = async (janelaPreAberta = null) => {
-    const loja = lojas.find((l) => l.id === filtroLojaForm);
-    const maquina = maquinas.find((m) => m.id === formData.maquina_id);
-    const produto = produtos.find((p) => p.id === formData.produto_id);
-    const capacidadeMaquina =
-      maquina?.capacidadePadrao ?? maquina?.capacidade ?? null;
-
-    const totalPre = parseInt(formData.quantidadeAtualMaquina) || 0;
-    const quantidadeAdicionada = parseInt(formData.quantidadeAdicionada) || 0;
-    const retiradaProduto = parseInt(formData.retiradaProduto) || 0;
-    const totalPos = totalPre + quantidadeAdicionada - retiradaProduto;
-
-    let mensagem = ` *Movimentação de Máquina*\n`;
-    mensagem += `━━━━━━━━━━━━━━━━━━━━\n\n`;
-    mensagem += `->  *Loja:* ${loja?.nome || "Não informada"}\n`;
-    mensagem += `->  *Máquina:* ${maquina ? `${maquina.nome} - ${maquina.codigo}` : "Não informada"}\n`;
-    mensagem += `->  *Produto:* ${produto ? `${produto.emoji || ""} ${produto.nome}` : "Não informado"}\n`;
-    mensagem += `->  *Capacidade da máquina:* ${capacidadeMaquina ?? "Não informada"}\n`;
-
-    if (!formData.ignoreInOut) {
-      mensagem += `\n━━━━━━━━━━━━━━━━━━━━\n`;
-      mensagem += `->  *Contador IN:* ${formData.contadorIn || "0"}\n`;
-      mensagem += `->  *Contador OUT:* ${formData.contadorOut || "0"}\n`;
-    }
-
-    mensagem += `\n━━━━━━━━━━━━━━━━━━━━\n`;
-    mensagem += `->  *Quantidade atual na máquina:* ${totalPre}\n`;
-    mensagem += `->  *Quantidade adicionada:* ${quantidadeAdicionada}\n`;
-    mensagem += `->  *Total após abastecimento:* ${totalPos}\n`;
-    mensagem += `->  *Fichas:* ${formData.fichas || "0"}\n`;
-
-    if (retiradaProduto > 0) {
-      mensagem += `\n━━━━━━━━━━━━━━━━━━━━\n`;
-      mensagem += `->  *Retirada de produto:* ${retiradaProduto}\n`;
-      mensagem += `->  *Devolvido ao estoque:* ${formData.retiradaProdutoDevolverEstoque ? "Sim ✅" : "Não ❌"}\n`;
-    }
-
-    if (formData.retiradaEstoque) {
-      mensagem += `\n━━━━━━━━━━━━━━━━━━━━\n`;
-      mensagem += `-> *Retirada de estoque (não é venda)*\n`;
-    }
-
-    if (formData.observacao?.trim()) {
-      mensagem += `\n━━━━━━━━━━━━━━━━━━━━\n`;
-      mensagem += `->  *Observação:* ${formData.observacao.trim()}\n`;
-    }
-
-    if (fotoContadores) {
-      mensagem += `\n->  *Foto dos contadores:* anexada nesta mensagem\n`;
-    }
-
-    localStorage.setItem(CHAVE_ULTIMA_MENSAGEM_WHATSAPP, mensagem);
-    setTemMensagemSalva(true);
-    try {
-      if (fotoContadores) {
-        await salvarFotoUltimaMovimentacao(fotoContadores);
-      } else {
-        await limparFotoUltimaMovimentacao();
-      }
-    } catch (err) {
-      console.error("Erro ao salvar foto da última movimentação:", err);
-    }
-
-    if (
-      fotoContadores &&
-      navigator.canShare &&
-      navigator.share &&
-      navigator.canShare({ files: [fotoContadores] })
-    ) {
-      try {
-        await navigator.share({
-          title: "Movimentacao de Maquina",
-          text: mensagem,
-          files: [fotoContadores],
-        });
-        if (janelaPreAberta && !janelaPreAberta.closed) janelaPreAberta.close();
-        return;
-      } catch (err) {
-        if (err?.name === "AbortError") {
-          if (janelaPreAberta && !janelaPreAberta.closed) janelaPreAberta.close();
-          return;
-        }
-        console.error("Erro ao compartilhar foto no WhatsApp:", err);
-      }
-    }
-
-    if (fotoContadores) {
-      setError(
-        "Este navegador nao permite anexar a foto automaticamente pelo WhatsApp. O texto foi aberto; anexe a foto manualmente na conversa.",
-      );
-    }
-
-    const url = `https://api.whatsapp.com/send?text=${encodeURIComponent(mensagem)}`;
-    navegarParaWhatsapp(janelaPreAberta, url);
-  };
+  const removerGasto = (indice) =>
+    atualizarCampos({
+      gastos: formData.gastos.filter((_, i) => i !== indice),
+    });
 
   const enviarUltimaMensagemSalva = async () => {
-    const janelaPreAberta = abrirJanelaWhatsapp();
-
-    const mensagem = localStorage.getItem(CHAVE_ULTIMA_MENSAGEM_WHATSAPP);
+    const janela = abrirJanelaWhatsapp();
+    let mensagem = null;
+    try {
+      mensagem = localStorage.getItem(CHAVE_ULTIMA_MENSAGEM_WHATSAPP);
+    } catch {
+      mensagem = null;
+    }
     if (!mensagem) {
-      if (janelaPreAberta && !janelaPreAberta.closed) janelaPreAberta.close();
+      if (janela && !janela.closed) janela.close();
       setError("Nenhuma mensagem de movimentação salva para reenviar.");
       return;
     }
-
-    const foto = await obterFotoUltimaMovimentacao().catch((err) => {
-      console.error("Erro ao ler foto salva da última movimentação:", err);
-      return null;
+    const fotoSalva = await obterFotoUltimaMovimentacao().catch(() => null);
+    await compartilharOuAbrir({
+      mensagem,
+      foto: fotoSalva,
+      janela,
+      onAvisoFoto: () =>
+        setError(
+          "Este navegador não anexa a foto sozinho. A mensagem foi aberta; anexe a foto na conversa.",
+        ),
     });
-
-    if (
-      foto &&
-      navigator.canShare &&
-      navigator.share &&
-      navigator.canShare({ files: [foto] })
-    ) {
-      try {
-        await navigator.share({
-          title: "Movimentacao de Maquina",
-          text: mensagem,
-          files: [foto],
-        });
-        if (janelaPreAberta && !janelaPreAberta.closed) janelaPreAberta.close();
-        return;
-      } catch (err) {
-        if (err?.name === "AbortError") {
-          if (janelaPreAberta && !janelaPreAberta.closed) janelaPreAberta.close();
-          return;
-        }
-        console.error("Erro ao compartilhar foto salva no WhatsApp:", err);
-      }
-    }
-
-    if (foto) {
-      setError(
-        "Este navegador não permite anexar a foto automaticamente pelo WhatsApp. O texto foi aberto; anexe a foto manualmente na conversa.",
-      );
-    }
-
-    const url = `https://api.whatsapp.com/send?text=${encodeURIComponent(mensagem)}`;
-    navegarParaWhatsapp(janelaPreAberta, url);
   };
-
-  const resetFluxoWhatsappBypass = () => {
-    setNaoVaiRegistrar(false);
-    setMostrarObsAlerta(false);
-    setObsAlerta("");
-  };
-
-  const handleClickEnviarWhatsapp = () => {
-    if (!naoVaiRegistrar) return;
-    if (!formData.maquina_id) {
-      setError("Selecione a máquina antes de enviar para o WhatsApp.");
-      return;
-    }
-    setMostrarObsAlerta(true);
-  };
-
-  const confirmarEnvioBypassWhatsapp = async () => {
-    if (!obsAlerta.trim() || enviandoAlerta) return;
-
-    // Precisa ser aberta aqui, de forma síncrona, para não ser bloqueada
-    // pelo Safari/iOS quando o envio ao WhatsApp acontecer mais tarde.
-    const janelaWhatsapp = abrirJanelaWhatsapp();
-    let janelaWhatsappUsada = false;
-
-    setEnviandoAlerta(true);
-    setError("");
-    try {
-      await api.post("/alertas-movimentacao", {
-        maquinaId: formData.maquina_id,
-        observacao: obsAlerta.trim(),
-        dadosAbastecimento: {
-          produtoId: formData.produto_id || null,
-          quantidadeAtualMaquina: formData.quantidadeAtualMaquina || null,
-          quantidadeAdicionada: formData.quantidadeAdicionada || null,
-          fichas: formData.fichas || null,
-          contadorIn: formData.contadorIn || null,
-          contadorOut: formData.contadorOut || null,
-          quantidade_notas_entrada: formData.quantidade_notas_entrada || null,
-          valor_entrada_maquininha_pix:
-            formData.valor_entrada_maquininha_pix || null,
-        },
-      });
-      await enviarParaWhatsapp(janelaWhatsapp);
-      janelaWhatsappUsada = true;
-      resetFluxoWhatsappBypass();
-    } catch (err) {
-      console.error("Erro ao registrar alerta de movimentação:", err);
-      setError(
-        err?.response?.data?.error ||
-          "Não foi possível registrar o alerta. O WhatsApp não foi aberto.",
-      );
-    } finally {
-      if (janelaWhatsapp && !janelaWhatsappUsada && !janelaWhatsapp.closed) {
-        janelaWhatsapp.close();
-      }
-      setEnviandoAlerta(false);
-    }
-  };
-
-  // --- CÁLCULOS DE ESTATÍSTICAS ---
-  const entradas = movimentacoes.filter((m) => m.abastecidas > 0);
-  const saidas = movimentacoes.filter((m) => m.sairam > 0);
-  const totalEntradas = entradas.reduce(
-    (sum, m) => sum + (m.abastecidas || 0),
-    0,
-  );
-  const totalSaidas = saidas.reduce((sum, m) => sum + (m.sairam || 0), 0);
-
-  const movimentacoesFiltradas = filtroLojaListagem
-    ? movimentacoes.filter((mov) => {
-        const maquina = maquinas.find((m) => m.id === mov.maquinaId);
-        return maquina?.lojaId === filtroLojaListagem;
-      })
-    : movimentacoes;
-
-  const stats = [
-    {
-      label: "Total de Entradas",
-      value: totalEntradas,
-      icon: "📥",
-      gradient: "bg-gradient-to-br from-green-500 to-green-600",
-      subtitle: "Produtos abastecidos",
-    },
-    {
-      label: "Total de Saídas",
-      value: totalSaidas,
-      icon: "📤",
-      gradient: "bg-gradient-to-br from-red-500 to-red-600",
-      subtitle: "Produtos vendidos",
-    },
-    {
-      label: "Saldo",
-      value: totalEntradas - totalSaidas,
-      icon: "📊",
-      gradient: "bg-gradient-to-br from-blue-500 to-blue-600",
-      subtitle: "Diferença entrada/saída",
-    },
-    {
-      label: "Movimentações",
-      value: movimentacoes.length,
-      icon: "🔄",
-      gradient: "bg-gradient-to-br from-purple-500 to-purple-600",
-      subtitle: "Total de registros",
-    },
-  ];
-
-  const columns = [
-    {
-      key: "data",
-      label: "Data/Hora",
-      render: (mov) => {
-        const data = new Date(mov.dataColeta || mov.createdAt);
-        return (
-          <div>
-            <div className="font-semibold">
-              {data.toLocaleDateString("pt-BR")}
-            </div>
-            <div className="text-xs text-gray-500">
-              {data.toLocaleTimeString("pt-BR")}
-            </div>
-          </div>
-        );
-      },
-    },
-    {
-      key: "usuario",
-      label: "Usuário",
-      render: (mov) => (
-        <div className="flex items-center gap-1">
-          <span className="text-lg">👤</span>
-          <span className="text-sm font-medium text-gray-700">
-            {mov.usuario?.nome || "Não informado"}
-          </span>
-        </div>
-      ),
-    },
-    {
-      key: "tipo",
-      label: "Tipo",
-      render: (mov) => {
-        const isEntrada = mov.abastecidas > 0;
-        return (
-          <Badge variant={isEntrada ? "success" : "danger"}>
-            {isEntrada ? "📥 Entrada" : "📤 Saída"}
-          </Badge>
-        );
-      },
-    },
-    {
-      key: "produto",
-      label: "Produto",
-      render: (mov) => {
-        const produtoId = mov.detalhesProdutos?.[0]?.produtoId;
-        const produto = produtos.find((p) => p.id === produtoId);
-        return produto ? (
-          <div className="flex items-center gap-2">
-            <span className="text-xl">{produto.emoji || "🧸"}</span>
-            <span>{produto.nome}</span>
-          </div>
-        ) : (
-          `N/A (ID: ${produtoId || "undefined"})`
-        );
-      },
-    },
-    {
-      key: "maquina",
-      label: "Máquina",
-      render: (mov) => {
-        const maquina =
-          mov.maquina || maquinas.find((m) => m.id === mov.maquinaId);
-        if (!maquina) return `N/A (ID: ${mov.maquinaId})`;
-        const loja = lojas.find((l) => l.id === maquina.lojaId);
-        return (
-          <div>
-            <div className="font-semibold">
-              {maquina.codigo}
-              <span className="text-gray-500 text-xs ml-1">
-                - {maquina.nome}
-              </span>
-            </div>
-            <div className="text-xs text-gray-500">{loja?.nome || "N/A"}</div>
-          </div>
-        );
-      },
-    },
-    {
-      key: "saida",
-      label: "Saída",
-      render: (mov) => (
-        <div className="flex items-center gap-1">
-          <span className="text-lg">📤</span>
-          <span className="font-bold text-red-600">
-            {mov.sairam > 0 ? `-${mov.sairam}` : "-"}
-          </span>
-        </div>
-      ),
-    },
-    {
-      key: "entrada",
-      label: "Entrada",
-      render: (mov) => (
-        <div className="flex items-center gap-1">
-          <span className="text-lg">📥</span>
-          <span className="font-bold text-green-600">
-            {mov.abastecidas > 0 ? `+${mov.abastecidas}` : "-"}
-          </span>
-        </div>
-      ),
-    },
-    {
-      key: "fichas",
-      label: "Fichas",
-      render: (mov) => (
-        <div className="flex items-center gap-1">
-          <span className="text-lg">🎫</span>
-          <span className="font-semibold text-blue-600">{mov.fichas || 0}</span>
-        </div>
-      ),
-    },
-    {
-      key: "observacao",
-      label: "Observação",
-      render: (mov) => (
-        <span className="text-sm text-gray-600">{mov.observacoes || "-"}</span>
-      ),
-    },
-  ];
-
-  if (usuario?.role === "ADMIN") {
-    columns.push({
-      key: "acoes",
-      label: "Ações",
-      render: (mov) => (
-        <button
-          onClick={() => iniciarEdicao(mov)}
-          className="px-3 py-1 bg-blue-500 hover:bg-blue-600 text-white text-sm rounded-lg transition-colors flex items-center gap-1"
-        >
-          <svg
-            className="w-4 h-4"
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth={2}
-              d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"
-            />
-          </svg>
-          Editar
-        </button>
-      ),
-    });
-  }
 
   if (loading) return <PageLoader />;
 
-  const contadorInAtualNum = parseInt(formData.contadorIn);
-  const diferencaContadorIn =
-    !formData.ignoreInOut &&
-    !isNaN(contadorInAtualNum) &&
-    ultimoContadorMaquina.contadorIn !== null
-      ? Math.abs(contadorInAtualNum - ultimoContadorMaquina.contadorIn)
-      : 0;
-  const contadorInSuspeito = diferencaContadorIn > LIMITE_DIFERENCA_CONTADOR_IN;
-
-  const contadorOutAtualNum = parseInt(formData.contadorOut);
-  const diferencaContadorOut =
-    !formData.ignoreInOut &&
-    !isNaN(contadorOutAtualNum) &&
-    ultimoContadorMaquina.contadorOut !== null
-      ? Math.abs(contadorOutAtualNum - ultimoContadorMaquina.contadorOut)
-      : 0;
-  const contadorOutSuspeito =
-    diferencaContadorOut > LIMITE_DIFERENCA_CONTADOR_OUT;
-
-  // O valor calculado pela Machine Pay (modo "auto" ou "forcar_manual") não
-  // trava o campo: o operador pode sempre ajustar. Mas se o que ele digitou
-  // não bater com o valor esperado, pede recontagem e confirmação explícita.
-  const totalPreDigitadoNum = parseInt(formData.quantidadeAtualMaquina);
-  const divergenciaMachinePaySuspeita =
-    sugestaoTotalPreMachinePay?.sugestaoDisponivel &&
-    (sugestaoTotalPreMachinePay?.modo === "forcar_manual" ||
-      sugestaoTotalPreMachinePay?.modo === "auto") &&
-    !isNaN(totalPreDigitadoNum) &&
-    totalPreDigitadoNum !== sugestaoTotalPreMachinePay.sugestaoTotalPre;
-
-  const lojaSelecionadaNoForm = lojas.find(
-    (l) => String(l.id) === String(filtroLojaForm),
+  // --- Derivados ---
+  const lojasAtivas = lojas.filter((l) => l.ativo !== false);
+  const lojaSelecionada = lojas.find(
+    (l) => String(l.id) === String(filtroLoja),
   );
-  const maquinaSelecionadaNoForm = maquinas.find(
-    (m) => String(m.id) === String(formData.maquina_id),
+  const maquinasDaLoja = filtroLoja
+    ? maquinas.filter(
+        (m) => String(m.lojaId) === String(filtroLoja) && m.ativo !== false,
+      )
+    : [];
+  const dadosDaLojaAtual =
+    dadosLoja && String(dadosLoja.lojaId) === String(filtroLoja)
+      ? dadosLoja
+      : null;
+  const concluidas = dadosDaLojaAtual?.concluidas || {};
+  const manutencoes = dadosDaLojaAtual?.manutencoes || {};
+  const historico = dadosDaLojaAtual?.historico || [];
+  const maquinasConcluidas = maquinasDaLoja.filter(
+    (m) => concluidas[m.id],
+  ).length;
+  const maquinasEmAndamento = maquinasDaLoja.filter(
+    (m) => rascunhos[m.id],
+  ).length;
+
+  const maquinaSelecionada = maquinas.find(
+    (m) => String(m.id) === String(maquinaAberta),
   );
-  const produtoSelecionadoNoForm = produtos.find(
+  const produtoSelecionado = produtos.find(
     (p) => String(p.id) === String(formData.produto_id),
   );
-  const quantidadeAdicionadaNoForm =
-    parseInt(formData.quantidadeAdicionada) || 0;
-  const retiradaProdutoNoForm = parseInt(formData.retiradaProduto) || 0;
+  const resumo = chaveResumo ? resumos[chaveResumo] : null;
+  const ultimaMov = resumo?.dados?.ultimaMovimentacao || null;
+  const machinePay = resumo?.dados?.machinePay || null;
+  const machinePayConfigurada = machinePay
+    ? machinePay.configurada
+    : Boolean(maquinaSelecionada?.machinePayPosId);
 
-  const resumoConfirmacaoMovimentacao = (
-    <>
-      <span className="block">
-        <strong>Loja:</strong> {lojaSelecionadaNoForm?.nome || "-"}
-      </span>
-      <span className="block">
-        <strong>Máquina:</strong>{" "}
-        {maquinaSelecionadaNoForm
-          ? `${maquinaSelecionadaNoForm.nome} - ${maquinaSelecionadaNoForm.codigo}`
-          : "-"}
-      </span>
-      <span className="block">
-        <strong>Produto:</strong> {produtoSelecionadoNoForm?.nome || "-"}
-      </span>
-      {!formData.ignoreInOut && (
-        <>
-          <span className="block">
-            <strong>Contador IN:</strong> {formData.contadorIn || "0"}
-          </span>
-          <span className="block">
-            <strong>Contador OUT:</strong> {formData.contadorOut || "0"}
-          </span>
-        </>
-      )}
-      <span className="block">
-        <strong>Fichas coletadas:</strong> {formData.fichas || "0"}
-      </span>
-      <span className="block">
-        <strong>Quantidade atual na máquina:</strong>{" "}
-        {formData.quantidadeAtualMaquina || "0"}
-      </span>
-      <span className="block font-bold text-green-700">
-        <strong>Quantidade abastecida:</strong> {quantidadeAdicionadaNoForm}
-      </span>
-      {retiradaProdutoNoForm > 0 && (
-        <span className="block">
-          <strong>Retirada de produto:</strong> {retiradaProdutoNoForm}
-        </span>
-      )}
-    </>
-  );
+  const inAtual = parseInt(formData.contadorIn);
+  const outAtual = parseInt(formData.contadorOut);
+  const difIn =
+    !Number.isNaN(inAtual) && typeof ultimaMov?.contadorIn === "number"
+      ? inAtual - ultimaMov.contadorIn
+      : null;
+  const difOut =
+    !Number.isNaN(outAtual) && typeof ultimaMov?.contadorOut === "number"
+      ? outAtual - ultimaMov.contadorOut
+      : null;
+  const avisosContadores = [
+    difIn !== null &&
+      difIn < 0 &&
+      `Contador IN (${inAtual}) menor que o da última movimentação (${ultimaMov.contadorIn})`,
+    difOut !== null &&
+      difOut < 0 &&
+      `Contador OUT (${outAtual}) menor que o da última movimentação (${ultimaMov.contadorOut})`,
+    difIn !== null &&
+      difIn > LIMITE_DIFERENCA_CONTADOR_IN &&
+      `Contador IN subiu ${difIn} desde a última movimentação — confira se não trocou os contadores ou digitou um número a mais`,
+    difOut !== null &&
+      difOut > LIMITE_DIFERENCA_CONTADOR_OUT &&
+      `Contador OUT subiu ${difOut} desde a última movimentação — confira se não trocou os contadores ou digitou um número a mais`,
+  ].filter(Boolean);
+
+  const dinheiro = numero(formData.dinheiroRetirado);
+  const valorMachinePay =
+    machinePay && machinePay.valor !== null && machinePay.valor !== undefined
+      ? Number(machinePay.valor)
+      : null;
+  const gastosOk = gastosValidos(formData.gastos);
+  const totalGastos = gastosOk.reduce((s, g) => s + numero(g.valor), 0);
+  const liquido = dinheiro + (valorMachinePay || 0) - totalGastos;
+
+  const progressoAberta = progressoRascunho(formData);
+  const pendencias = [
+    ...progressoAberta.faltando.map((f) => `preencher ${f}`),
+    gastosIncompletos(formData.gastos).length > 0 &&
+      "completar ou remover o gasto extra sem descrição ou valor",
+    machinePayConfigurada &&
+      machinePay?.precisaDataInicio &&
+      "escolher desde quando somar a Machine Pay (a máquina ainda não tem movimentação)",
+    machinePayConfigurada && !resumo?.dados && !resumo?.erro &&
+      "aguardar o cálculo da Machine Pay",
+    avisosContadores.length > 0 &&
+      !confirmacaoContadores &&
+      "confirmar os contadores",
+  ].filter(Boolean);
+
+  const montarMensagem = () => {
+    const linhas = [
+      "*Movimentação de Máquina*",
+      "━━━━━━━━━━━━━━━━━━━━",
+      `🏪 *Loja:* ${lojaSelecionada?.nome || "-"}`,
+      `🎰 *Máquina:* ${maquinaSelecionada ? `${maquinaSelecionada.nome}${maquinaSelecionada.codigo ? ` - ${maquinaSelecionada.codigo}` : ""}` : "-"}`,
+      `🧸 *Produto:* ${produtoSelecionado ? `${produtoSelecionado.emoji || ""} ${produtoSelecionado.nome}`.trim() : "-"}`,
+      "",
+      `🔢 *Contador IN:* ${formData.contadorIn || "0"}${difIn !== null && difIn >= 0 ? ` (+${difIn})` : ""}`,
+      `🔢 *Contador OUT:* ${formData.contadorOut || "0"}${difOut !== null && difOut >= 0 ? ` (+${difOut})` : ""}`,
+      `📦 *Abastecido:* ${numero(formData.quantidadeAdicionada)}`,
+      "",
+      `💵 *Dinheiro retirado:* ${formatarReais(dinheiro)}`,
+    ];
+    if (machinePayConfigurada) {
+      linhas.push(
+        `💳 *Machine Pay:* ${valorMachinePay === null ? "não consultado" : formatarReais(valorMachinePay)}${machinePay?.inicio ? ` (desde ${formatarDataHora(machinePay.inicio)})` : ""}`,
+      );
+    }
+    if (gastosOk.length) {
+      linhas.push("", "🧾 *Gastos extras:*");
+      for (const g of gastosOk) {
+        linhas.push(`   • ${g.descricao.trim()}: ${formatarReais(numero(g.valor))}`);
+      }
+    }
+    linhas.push("", `✅ *Total líquido:* ${formatarReais(liquido)}`);
+    if (formData.observacao?.trim()) {
+      linhas.push("", `📝 *Observação:* ${formData.observacao.trim()}`);
+    }
+    if (foto) linhas.push("", "📷 Foto dos contadores anexada");
+    return linhas.join("\n");
+  };
+
+  const abrirConfirmacao = (e) => {
+    e.preventDefault();
+    if (pendencias.length) {
+      setError(`Antes de registrar: ${pendencias.join("; ")}.`);
+      return;
+    }
+    setError("");
+    setMostrarConfirmacao(true);
+  };
+
+  const registrar = async () => {
+    if (envioEmAndamentoRef.current) return;
+    // Aberta já no clique (senão o navegador bloqueia a aba do WhatsApp).
+    const janela = abrirJanelaWhatsapp();
+    let janelaUsada = false;
+    envioEmAndamentoRef.current = true;
+    setSalvando(true);
+    setError("");
+    setSuccess("");
+
+    const maquinaId = formData.maquina_id;
+    const abastecidas = Math.max(
+      0,
+      parseInt(formData.quantidadeAdicionada) || 0,
+    );
+    try {
+      await api.post("/movimentacoes", {
+        maquinaId,
+        modoSimples: true,
+        abastecidas,
+        fichas: 0,
+        contadorIn: Number.isNaN(inAtual) ? null : inAtual,
+        contadorOut: Number.isNaN(outAtual) ? null : outAtual,
+        valorEntradaNotas: dinheiro,
+        ...(formData.machinePayInicio && {
+          machinePayDataInicio: new Date(
+            formData.machinePayInicio,
+          ).toISOString(),
+        }),
+        gastosExtras: gastosOk.map((g) => ({
+          descricao: g.descricao.trim(),
+          valor: numero(g.valor),
+        })),
+        observacoes: formData.observacao?.trim() || null,
+        produtos: [
+          {
+            produtoId: formData.produto_id,
+            quantidadeSaiu: 0,
+            quantidadeAbastecida: abastecidas,
+            retiradaProduto: 0,
+          },
+        ],
+      });
+
+      if (
+        alertaOrigem &&
+        String(alertaOrigem.maquinaId) === String(maquinaId)
+      ) {
+        try {
+          await api.patch(`/alertas-movimentacao/${alertaOrigem.id}/resolver`);
+        } catch (erroAlerta) {
+          console.error("Erro ao resolver alerta de origem:", erroAlerta);
+        }
+        setAlertaOrigem(null);
+      }
+
+      const mensagem = montarMensagem();
+      try {
+        localStorage.setItem(CHAVE_ULTIMA_MENSAGEM_WHATSAPP, mensagem);
+        setTemMensagemSalva(true);
+      } catch {
+        // Sem localStorage: só não dá pra reenviar depois.
+      }
+      try {
+        if (foto) await salvarFotoUltimaMovimentacao(foto);
+        else await limparFotoUltimaMovimentacao();
+      } catch (erroFoto) {
+        console.error("Erro ao guardar a foto da última movimentação:", erroFoto);
+      }
+
+      const fotoEnvio = foto;
+      const nomeMaquina = maquinaSelecionada?.nome || "máquina";
+      descartarRascunho(maquinaId);
+      trocarFoto(null);
+      setFormData(FORMULARIO_VAZIO);
+      setMostrarConfirmacao(false);
+      setSuccess(
+        `Movimentação de ${nomeMaquina} registrada${gastosOk.length ? ` (${gastosOk.length} gasto(s) extra(s) lançado(s) na Gestão de Contas como pagos)` : ""}.`,
+      );
+      setAtualizacaoLoja((n) => n + 1);
+
+      janelaUsada = true;
+      await compartilharOuAbrir({
+        mensagem,
+        foto: fotoEnvio,
+        janela,
+        onAvisoFoto: () =>
+          setError(
+            "Este navegador não anexa a foto sozinho. A mensagem foi aberta; anexe a foto na conversa.",
+          ),
+      });
+    } catch (err) {
+      console.error("Erro ao registrar movimentação:", err);
+      setMostrarConfirmacao(false);
+      setError(
+        err.response?.data?.message ||
+          err.response?.data?.error ||
+          "Erro ao registrar movimentação",
+      );
+    } finally {
+      if (janela && !janelaUsada && !janela.closed) janela.close();
+      envioEmAndamentoRef.current = false;
+      setSalvando(false);
+    }
+  };
+
+  const excluirMovimentacao = async () => {
+    if (!excluindo) return;
+    try {
+      await api.delete(`/movimentacoes/${excluindo.id}`);
+      setSuccess(
+        "Movimentação excluída (os gastos extras dela saíram da Gestão de Contas).",
+      );
+      setAtualizacaoLoja((n) => n + 1);
+    } catch (err) {
+      setError(err.response?.data?.error || "Erro ao excluir movimentação");
+    } finally {
+      setExcluindo(null);
+    }
+  };
 
   return (
     <div className="min-h-screen bg-background-light bg-pattern teddy-pattern">
       <Navbar />
 
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {/* Header com dois botões lado a lado */}
+      <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-6">
           <PageHeader
             title="Movimentações"
-            subtitle="Registre entradas e saídas de produtos nas máquinas"
+            subtitle="Escolha a loja e vá registrando as máquinas"
             icon="🔄"
             action={null}
           />
           <div className="flex flex-wrap gap-3">
             <button
-              className="px-6 py-2 bg-yellow-500 text-white rounded hover:bg-yellow-600 font-bold shadow text-base"
-              onClick={() => {
-                setShowForm((v) => !v);
-                setAlertaOrigemId(null);
-              }}
-            >
-              {showForm ? "Cancelar" : "Nova Movimentação"}
-            </button>
-            <button
-              className="px-6 py-2 bg-rose-600 text-white rounded hover:bg-rose-700 font-bold shadow text-base"
+              className="px-5 py-2 bg-rose-600 text-white rounded hover:bg-rose-700 font-bold shadow"
               onClick={() => navigate("/sangrias")}
             >
               Sangria
             </button>
-            {usuario?.role !== "FUNCIONARIO" && (
-              <button
-                className="px-6 py-2 bg-blue-700 text-white rounded hover:bg-blue-800 font-bold shadow text-base"
-                onClick={() => setModalRegistrarDinheiro(true)}
-              >
-                Registrar Dinheiro
-              </button>
-            )}
             <button
-              className="px-6 py-2 bg-emerald-600 text-white rounded hover:bg-emerald-700 font-bold shadow text-base"
-              onClick={() => setModalGastoVariavel(true)}
-            >
-              Lançar Gasto Variável
-            </button>
-            <button
-              className="px-6 py-2 bg-gray-700 text-white rounded hover:bg-gray-800 font-bold shadow text-base disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-gray-700"
+              className="px-5 py-2 bg-gray-700 text-white rounded hover:bg-gray-800 font-bold shadow disabled:opacity-50 disabled:cursor-not-allowed"
               onClick={enviarUltimaMensagemSalva}
               disabled={!temMensagemSalva}
               title={
                 temMensagemSalva
-                  ? "Reenviar a mensagem da última movimentação lançada"
+                  ? "Reenviar a mensagem da última movimentação"
                   : "Nenhuma mensagem salva ainda"
               }
             >
@@ -1643,110 +1019,6 @@ export function Movimentacoes() {
             </button>
           </div>
         </div>
-
-        {/* Modal Lançar Gasto Variável */}
-        {modalGastoVariavel && (
-          <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
-            <div className="bg-white rounded-lg p-6 shadow-lg relative">
-              <button
-                onClick={() => setModalGastoVariavel(false)}
-                style={{
-                  position: "absolute",
-                  top: 12,
-                  right: 16,
-                  fontSize: 22,
-                  background: "none",
-                  border: "none",
-                  cursor: "pointer",
-                  color: "#888",
-                }}
-                aria-label="Fechar"
-              >
-                ×
-              </button>
-              <LancarGastoVariavel
-                lojas={lojas}
-                veiculos={veiculos}
-                onClose={() => setModalGastoVariavel(false)}
-                onSuccess={() => {
-                  setSuccess("Gasto variável lançado com sucesso!");
-                  carregarDados();
-                }}
-              />
-            </div>
-          </div>
-        )}
-        {/* Modal Registrar Dinheiro */}
-        {modalRegistrarDinheiro && (
-          <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
-            <div
-              className="bg-white rounded-lg p-6 shadow-lg relative"
-              style={{ minWidth: 520 }}
-            >
-              <button
-                onClick={() => setModalRegistrarDinheiro(false)}
-                style={{
-                  position: "absolute",
-                  top: 12,
-                  right: 16,
-                  fontSize: 22,
-                  background: "none",
-                  border: "none",
-                  cursor: "pointer",
-                  color: "#888",
-                }}
-                aria-label="Fechar"
-              >
-                ×
-              </button>
-              <RegistrarDinheiro
-                lojas={lojas}
-                maquinas={maquinas}
-                onSubmit={async (data) => {
-                  try {
-                    setError("");
-                    setSuccess("");
-                    const response = await api.post("/registro-dinheiro", data);
-                    // Máquina com os dois IDs fecha nos dois sistemas;
-                    // junta as mensagens de cada um.
-                    const mensagemFechamento = (fechamento, nome) => {
-                      if (!fechamento?.executado) return null;
-                      if (fechamento.concluido) {
-                        return fechamento.jaExistia
-                          ? `esse período já estava fechado na ${nome}`
-                          : `fechamento concluído na ${nome}`;
-                      }
-                      return `a ${nome} não confirmou o fechamento${
-                        fechamento.erro ? ` (${fechamento.erro})` : ""
-                      }`;
-                    };
-                    const mensagens = [
-                      mensagemFechamento(
-                        response.data?.fechamentoMachinePay,
-                        "Machine Pay",
-                      ),
-                      mensagemFechamento(
-                        response.data?.fechamentoCompactPay,
-                        "CompactPay",
-                      ),
-                    ].filter(Boolean);
-                    setSuccess(
-                      mensagens.length
-                        ? `Registro salvo: ${mensagens.join("; ")}.`
-                        : "Registro de dinheiro salvo com sucesso!",
-                    );
-                    setModalRegistrarDinheiro(false);
-                  } catch (err) {
-                    setError(
-                      err?.response?.data?.error ||
-                        "Erro ao registrar dinheiro.",
-                    );
-                  }
-                }}
-              />
-            </div>
-          </div>
-        )}
 
         {error && (
           <AlertBox type="error" message={error} onClose={() => setError("")} />
@@ -1759,1214 +1031,820 @@ export function Movimentacoes() {
           />
         )}
 
-        {usuario?.role === "ADMIN" && <StatsGrid stats={stats} />}
+        <div className="card-gradient mb-6">
+          <label
+            htmlFor="loja-atual"
+            className="block text-sm font-semibold text-gray-700 mb-2"
+          >
+            🏪 Loja atual
+          </label>
+          <select
+            id="loja-atual"
+            value={filtroLoja}
+            onChange={(e) => {
+              if (formData.maquina_id) selecionarMaquina(formData.maquina_id);
+              setFiltroLoja(e.target.value);
+            }}
+            className="select-field text-base font-semibold"
+          >
+            <option value="">Em qual loja você está?</option>
+            {lojasAtivas.map((loja) => (
+              <option key={loja.id} value={loja.id}>
+                {loja.nome}
+              </option>
+            ))}
+          </select>
 
-        <AvisosMaquinasFaltam lojas={lojas} />
-
-        {/* Filtro por Loja - Apenas para ADMIN */}
-        {usuario?.role === "ADMIN" && (
-          <div className="card-gradient mb-6">
-            <h3 className="text-lg font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <span className="text-2xl">🔍</span>
-              Filtrar Movimentações
-            </h3>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div>
-                <label className="block text-sm font-semibold text-gray-700 mb-2">
-                  🏪 Filtrar por Loja
-                </label>
-                <select
-                  value={filtroLojaListagem}
-                  onChange={(e) => setFiltroLojaListagem(e.target.value)}
-                  className="input-field"
-                >
-                  <option value="">Todas as lojas</option>
-                  {lojas.map((loja) => (
-                    <option key={loja.id} value={loja.id}>
-                      {loja.nome}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {showForm && (
-          <div id="form-nova-movimentacao" className="card-gradient mb-6">
-            <h3 className="text-lg font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <span className="text-2xl">📝</span>
-              Registrar Movimentação
-            </h3>
-
-            <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
-              <p className="text-sm text-blue-800 flex items-center gap-2">
-                <svg
-                  className="w-4 h-4"
-                  fill="currentColor"
-                  viewBox="0 0 20 20"
-                >
-                  <path
-                    fillRule="evenodd"
-                    d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z"
-                    clipRule="evenodd"
-                  />
-                </svg>
-                <strong>Como funciona:</strong> Informe quantos produtos tem
-                AGORA na máquina (o sistema calcula o que saiu). Se abastecer,
-                informe quantos foram adicionados.
+          {!filtroLoja ? (
+            <div className="mt-6 rounded-2xl border border-dashed border-slate-300 bg-white/70 py-10 text-center">
+              <div className="text-4xl mb-2">🏪</div>
+              <p className="font-semibold text-slate-700">
+                Escolha a loja para ver as máquinas
+              </p>
+              <p className="text-sm text-slate-500 mt-1">
+                Toque numa máquina para registrar. Dá para ir preenchendo
+                várias ao mesmo tempo.
               </p>
             </div>
-
-            <form onSubmit={handleSubmit} className="space-y-4">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-2">
-                    Loja *
-                  </label>
-                  <select
-                    value={filtroLojaForm}
-                    onChange={(e) => {
-                      setFiltroLojaForm(e.target.value);
-                      setFormData({
-                        ...formData,
-                        maquina_id: "",
-                        produto_id: "",
-                      });
-                    }}
-                    className="select-field"
-                    required
-                  >
-                    <option value="">Selecione uma loja...</option>
-                    {lojas
-                      .filter((l) => l.ativo)
-                      .map((loja) => (
-                        <option key={loja.id} value={loja.id}>
-                          {loja.nome}
-                        </option>
-                      ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-2">
-                    Máquina *
-                  </label>
-                  <select
-                    name="maquina_id"
-                    value={formData.maquina_id}
-                    onChange={handleChange}
-                    className="select-field"
-                    required
-                    disabled={!filtroLojaForm}
-                  >
-                    <option value="">
-                      {filtroLojaForm
-                        ? "Selecione uma máquina..."
-                        : "Primeiro selecione uma loja"}
-                    </option>
-                    {maquinas
-                      .filter(
-                        (m) =>
-                          !filtroLojaForm ||
-                          String(m.lojaId) === String(filtroLojaForm),
-                      )
-                      .map((maquina) => (
-                        <option key={maquina.id} value={maquina.id}>
-                          {maquina.nome} - {maquina.codigo}
-                        </option>
-                      ))}
-                  </select>
-                  {filtroLojaForm && (
-                    <p className="text-xs text-gray-500 mt-1">
-                      💡 Mostrando apenas máquinas da loja selecionada
-                    </p>
-                  )}
-                </div>
-
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-2">
-                    Produto *
-                  </label>
-                  <select
-                    name="produto_id"
-                    value={formData.produto_id}
-                    onChange={handleChange}
-                    className={`select-field ${formData.produto_id ? "border-blue-500 bg-blue-50" : ""}`}
-                    required
-                  >
-                    <option value="">Nenhum produto</option>
-                    {produtos.map((produto) => (
-                      <option key={produto.id} value={produto.id}>
-                        {produto.emoji || "🧸"} {produto.nome}
-                      </option>
-                    ))}
-                  </select>
-                  {formData.maquina_id && formData.produto_id && (
-                    <p className="text-[10px] text-blue-600 mt-1 animate-pulse">
-                      ✨ Produto sugerido com base na última visita
-                    </p>
-                  )}
-                </div>
-
-                <div className="md:col-span-2">
-                  <label className="block text-sm font-semibold text-gray-700 mb-2">
-                    Observação
-                  </label>
-                  <textarea
-                    name="observacao"
-                    value={formData.observacao}
-                    onChange={handleChange}
-                    className="input-field"
-                    rows="2"
-                    placeholder="Informações adicionais sobre a movimentação..."
-                  />
-                </div>
-              </div>
-
-              <div className="p-4 bg-white border border-blue-100 rounded-lg">
-                <label className="block text-sm font-semibold text-gray-700 mb-2">
-                  Foto dos contadores
-                </label>
-                <input
-                  id="foto-contadores-camera"
-                  type="file"
-                  accept="image/*"
-                  capture="environment"
-                  onChange={handleFotoContadores}
-                  className="sr-only"
-                  disabled={lendoFotoContadores}
-                />
-                <label
-                  htmlFor="foto-contadores-camera"
-                  className={`inline-flex w-full sm:w-auto items-center justify-center gap-2 rounded-lg px-4 py-2 font-semibold text-white shadow transition-colors ${
-                    lendoFotoContadores
-                      ? "cursor-not-allowed bg-gray-400"
-                      : "cursor-pointer bg-blue-600 hover:bg-blue-700"
-                  }`}
-                >
-                  <span aria-hidden="true">📷</span>
-                  {lendoFotoContadores ? "Lendo foto..." : "Tirar foto dos contadores"}
-                </label>
-                <p className="text-xs text-gray-500 mt-2">
-                  No celular, o botao abre a camera para fotografar os dois
-                  contadores. O maior numero sera usado como IN e o menor como
-                  OUT. Confira e ajuste se precisar.
+          ) : (
+            <div className="mt-6">
+              <div className="flex items-end justify-between gap-3 mb-2">
+                <h3 className="text-lg font-bold text-gray-900">Máquinas</h3>
+                <p className="text-sm font-semibold text-slate-600 tabular-nums">
+                  {!dadosDaLojaAtual
+                    ? "Atualizando..."
+                    : `${maquinasConcluidas} de ${maquinasDaLoja.length} concluídas${maquinasEmAndamento ? ` · ${maquinasEmAndamento} em andamento` : ""}`}
                 </p>
-
-                {fotoContadoresPreview && (
-                  <div className="mt-3 grid grid-cols-1 md:grid-cols-[160px_1fr] gap-3 items-start">
-                    <img
-                      src={fotoContadoresPreview}
-                      alt="Foto dos contadores"
-                      className="w-full max-w-40 rounded-lg border border-gray-200 object-cover"
-                    />
-                    <div className="text-sm">
-                      {resultadoFotoContadores && (
-                        <p
-                          className={`font-medium ${
-                            lendoFotoContadores
-                              ? "text-blue-700"
-                              : "text-gray-700"
-                          }`}
-                        >
-                          {resultadoFotoContadores}
-                        </p>
-                      )}
-                      <p className="text-xs text-gray-500 mt-1">
-                        A foto nao sera salva no sistema. Ela fica somente para
-                        anexar na mensagem do WhatsApp.
-                      </p>
-                      <button
-                        type="button"
-                        onClick={limparFotoContadores}
-                        className="mt-2 text-xs font-semibold text-red-600 hover:text-red-700"
-                      >
-                        Remover foto
-                      </button>
-                    </div>
-                  </div>
-                )}
               </div>
-              {/* Contadores da Máquina */}
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-2">
-                    📥 Contador IN (Entrada)
-                  </label>
-                  <input
-                    type="number"
-                    name="contadorIn"
-                    value={formData.contadorIn}
-                    onChange={handleChange}
-                    className="input-field"
-                    placeholder="0"
-                    min="0"
-                    required={!formData.ignoreInOut}
-                    disabled={formData.ignoreInOut}
-                  />
-                  <p className="text-xs text-gray-500 mt-1">
-                    Número do contador IN da máquina
-                  </p>
-                  {contadorInSuspeito && (
-                    <div className="mt-2 p-3 bg-red-50 border-l-4 border-red-500 rounded">
-                      <div className="flex items-start">
-                        <span className="text-red-600 text-lg mr-2">🚫</span>
-                        <div className="flex-1">
-                          <p className="text-xs font-bold text-red-800 mb-1">
-                            Diferença de {diferencaContadorIn} em relação ao
-                            último Contador IN registrado (
-                            {ultimoContadorMaquina.contadorIn}). Provavelmente
-                            há um erro de leitura ou digitação.
-                          </p>
-                          <label className="flex items-center gap-2 mt-2">
-                            <input
-                              type="checkbox"
-                              checked={confirmacaoContadorIn}
-                              onChange={(e) =>
-                                setConfirmacaoContadorIn(e.target.checked)
-                              }
-                              className="w-4 h-4 text-red-600 border-gray-300 rounded focus:ring-red-500"
-                            />
-                            <span className="text-xs font-semibold text-red-800">
-                              Tenho certeza que o Contador IN está correto
-                            </span>
-                          </label>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-2">
-                    📤 Contador OUT (Saída)
-                  </label>
-                  <input
-                    type="number"
-                    name="contadorOut"
-                    value={formData.contadorOut}
-                    onChange={handleChange}
-                    className="input-field"
-                    placeholder="0"
-                    min="0"
-                    required={!formData.ignoreInOut}
-                    disabled={formData.ignoreInOut}
-                  />
-                  <p className="text-xs text-gray-500 mt-1">
-                    Número do contador OUT da máquina
-                  </p>
-                  {contadorOutSuspeito && (
-                    <div className="mt-2 p-3 bg-red-50 border-l-4 border-red-500 rounded">
-                      <div className="flex items-start">
-                        <span className="text-red-600 text-lg mr-2">🚫</span>
-                        <div className="flex-1">
-                          <p className="text-xs font-bold text-red-800 mb-1">
-                            Diferença de {diferencaContadorOut} em relação ao
-                            último Contador OUT registrado (
-                            {ultimoContadorMaquina.contadorOut}). Provavelmente
-                            há um erro de leitura ou digitação.
-                          </p>
-                          <label className="flex items-center gap-2 mt-2">
-                            <input
-                              type="checkbox"
-                              checked={confirmacaoContadorOut}
-                              onChange={(e) =>
-                                setConfirmacaoContadorOut(e.target.checked)
-                              }
-                              className="w-4 h-4 text-red-600 border-gray-300 rounded focus:ring-red-500"
-                            />
-                            <span className="text-xs font-semibold text-red-800">
-                              Tenho certeza que o Contador OUT está correto
-                            </span>
-                          </label>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </div>
-              {/* Checkbox para ignorar IN/OUT */}
-              <div className="flex items-center mt-2 mb-4">
-                <input
-                  type="checkbox"
-                  id="ignoreInOut"
-                  name="ignoreInOut"
-                  checked={formData.ignoreInOut || false}
-                  onChange={handleChange}
-                  className="mr-2"
+              <div className="h-2 rounded-full bg-slate-200 overflow-hidden mb-4">
+                <div
+                  className="h-full rounded-full bg-emerald-500 transition-all"
+                  style={{
+                    width: `${maquinasDaLoja.length ? (maquinasConcluidas / maquinasDaLoja.length) * 100 : 0}%`,
+                  }}
                 />
-                <label htmlFor="ignoreInOut" className="text-sm text-gray-700">
-                  Não preciso informar IN/OUT nesta movimentação
-                </label>
               </div>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-2">
-                    📦 Quantidade Atual na Máquina *
-                  </label>
-                  <input
-                    type="number"
-                    name="quantidadeAtualMaquina"
-                    value={formData.quantidadeAtualMaquina}
-                    onChange={handleChange}
-                    className="input-field"
-                    placeholder={
-                      carregandoSugestaoMachinePay
-                        ? "Buscando na Machine Pay..."
-                        : "0"
-                    }
-                    min="0"
-                    disabled={carregandoSugestaoMachinePay}
-                  />
-                  <p className="text-xs text-gray-500 mt-1">
-                    Quantos produtos tem agora
-                  </p>
-                  {carregandoSugestaoMachinePay && (
-                    <p className="text-xs font-semibold text-blue-600 mt-1">
-                      💳 Buscando na Machine Pay...
-                    </p>
-                  )}
-                  {!carregandoSugestaoMachinePay &&
-                    sugestaoTotalPreMachinePay?.sugestaoDisponivel &&
-                    sugestaoTotalPreMachinePay.modo === "auto" && (
-                      <p className="text-xs font-semibold text-emerald-600 mt-1">
-                        {`${sugestaoTotalPreMachinePay.fonte === "compactPay" ? "📟" : "💳"} Sugestão via ${nomeFontePagamento(sugestaoTotalPreMachinePay.fonte)}`}
-                        : R${" "}
-                        {sugestaoTotalPreMachinePay.totalRecebidoDesdeUltimaMovimentacao.toFixed(
-                          2,
-                        )}{" "}
-                        recebidos desde a última coleta ({sugestaoTotalPreMachinePay.pulsos}{" "}
-                        pulso{sugestaoTotalPreMachinePay.pulsos === 1 ? "" : "s"}) →
-                        Total Pré sugerido: {sugestaoTotalPreMachinePay.sugestaoTotalPre}.
-                        Se o valor real for diferente, ajuste — vamos pedir
-                        para você confirmar que recontou.
-                      </p>
-                    )}
-                  {!carregandoSugestaoMachinePay &&
-                    sugestaoTotalPreMachinePay?.sugestaoDisponivel &&
-                    sugestaoTotalPreMachinePay.modo === "forcar_manual" && (
-                      <p className="text-xs font-semibold text-purple-600 mt-1">
-                        🔍 Conferência manual (a cada 15 dias): conte
-                        fisicamente e digite o valor.
-                      </p>
-                    )}
-                  {divergenciaMachinePaySuspeita && (
-                    <div className="mt-2 p-3 bg-red-50 border-l-4 border-red-500 rounded">
-                      <div className="flex items-start">
-                        <span className="text-red-600 text-lg mr-2">🚫</span>
-                        <div className="flex-1">
-                          <p className="text-xs font-bold text-red-800 mb-1">
-                            O valor digitado não confere com o que a{" "}
-                            {nomeFontePagamento(sugestaoTotalPreMachinePay?.fonte)}{" "}
-                            esperava. Reconte a máquina antes de confirmar.
-                          </p>
-                          <label className="flex items-center gap-2 mt-2">
-                            <input
-                              type="checkbox"
-                              checked={confirmacaoDivergenciaMachinePay}
-                              onChange={(e) =>
-                                setConfirmacaoDivergenciaMachinePay(
-                                  e.target.checked,
-                                )
-                              }
-                              className="w-4 h-4 text-red-600 border-gray-300 rounded focus:ring-red-500"
-                            />
-                            <span className="text-xs font-semibold text-red-800">
-                              Já recontei, o valor está correto mesmo assim
-                            </span>
-                          </label>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                  {formData.quantidadeAtualMaquina && estoqueAnterior > 0 && (
-                    <p className="text-xs font-semibold text-red-600 mt-1">
-                      🔻 Saíram:{" "}
-                      {Math.max(
-                        0,
-                        estoqueAnterior -
-                          parseInt(formData.quantidadeAtualMaquina || 0),
-                      )}{" "}
-                      unidades
-                    </p>
-                  )}
-                  {saidasCompactPay?.carregando && (
-                    <p className="text-xs text-blue-600 mt-1">
-                      📟 Buscando prêmios entregues na CompactPay...
-                    </p>
-                  )}
-                  {saidasCompactPay?.erro && (
-                    <p className="text-xs text-gray-500 mt-1">
-                      📟 Não foi possível consultar os prêmios entregues na
-                      CompactPay.
-                    </p>
-                  )}
-                  {saidasCompactPay?.disponivel && (
-                    <p
-                      className={`text-xs font-semibold mt-1 ${
-                        formData.quantidadeAtualMaquina &&
-                        Math.max(
-                          0,
-                          estoqueAnterior -
-                            parseInt(formData.quantidadeAtualMaquina || 0),
-                        ) !== saidasCompactPay.saidas
-                          ? "text-orange-600"
-                          : "text-emerald-600"
+
+              {maquinasDaLoja.length === 0 && (
+                <p className="py-8 text-center text-sm text-slate-500">
+                  Nenhuma máquina ativa cadastrada nesta loja.
+                </p>
+              )}
+
+              <div className="space-y-2">
+                {maquinasDaLoja.map((maquina) => {
+                  const aberta = String(maquinaAberta) === String(maquina.id);
+                  const concluidaEm = concluidas[maquina.id];
+                  const manutencoesPendentes = manutencoes[maquina.id] || 0;
+                  const rascunho = aberta ? formData : rascunhos[maquina.id];
+                  const temRascunho = aberta
+                    ? rascunhoTemDados(formData)
+                    : !!rascunhos[maquina.id];
+                  const progresso = progressoRascunho(rascunho);
+                  const barraCheia = concluidaEm && !temRascunho;
+
+                  return (
+                    <div
+                      key={maquina.id}
+                      id={`maquina-${maquina.id}`}
+                      className={`scroll-mt-4 rounded-2xl border overflow-hidden transition-shadow ${
+                        aberta
+                          ? "border-amber-400 bg-white shadow-lg"
+                          : concluidaEm
+                            ? "border-emerald-200 bg-emerald-50/60"
+                            : "border-slate-200 bg-white hover:shadow-md"
                       }`}
                     >
-                      📟 CompactPay: {saidasCompactPay.saidas} prêmio
-                      {saidasCompactPay.saidas === 1 ? "" : "s"} entregue
-                      {saidasCompactPay.saidas === 1 ? "" : "s"} desde a última
-                      movimentação (
-                      {new Date(saidasCompactPay.desde).toLocaleString("pt-BR")}
-                      ). Esperado no Total Pré:{" "}
-                      {Math.max(
-                        0,
-                        (saidasCompactPay.totalPosAnterior ?? estoqueAnterior) -
-                          saidasCompactPay.saidas,
-                      )}
-                    </p>
-                  )}
-                  {alertaDivergencia && (
-                    <div className="mt-2 p-3 bg-yellow-50 border-l-4 border-yellow-400 rounded">
-                      <div className="flex items-start">
-                        <span className="text-yellow-600 text-lg mr-2">⚠️</span>
-                        <div className="flex-1">
-                          <p className="text-xs font-bold text-yellow-800 mb-1">
-                            Atenção: Possível erro de contagem!
+                      <button
+                        type="button"
+                        onClick={() => selecionarMaquina(String(maquina.id))}
+                        className="w-full flex items-center gap-3 px-3 sm:px-4 py-3 text-left"
+                        aria-expanded={aberta}
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <p
+                              className={`font-bold truncate ${
+                                barraCheia && !aberta
+                                  ? "text-slate-500 line-through decoration-emerald-500/60"
+                                  : "text-slate-900"
+                              }`}
+                            >
+                              {maquina.nome}
+                            </p>
+                            {maquina.machinePayPosId && (
+                              <span className="shrink-0 rounded-full bg-blue-100 px-2 py-0.5 text-[10px] font-bold text-blue-700">
+                                💳 Machine Pay
+                              </span>
+                            )}
+                          </div>
+                          {maquina.codigo && maquina.codigo !== maquina.nome && (
+                            <p className="text-xs text-slate-500 truncate">
+                              {maquina.codigo}
+                            </p>
+                          )}
+                          <div className="mt-1.5 flex items-center gap-2">
+                            <BarraProgresso
+                              feitos={barraCheia ? 1 : progresso.feitos}
+                              total={barraCheia ? 1 : progresso.total}
+                              className="flex-1 max-w-56"
+                            />
+                            <span
+                              className={`shrink-0 text-xs font-semibold tabular-nums ${
+                                barraCheia
+                                  ? "text-emerald-700"
+                                  : temRascunho
+                                    ? "text-amber-700"
+                                    : "text-slate-400"
+                              }`}
+                            >
+                              {barraCheia
+                                ? `✓ Concluída às ${concluidaEm.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })}`
+                                : `${progresso.feitos}/${progresso.total}`}
+                            </span>
+                          </div>
+                        </div>
+                        {manutencoesPendentes > 0 && (
+                          <span
+                            className="shrink-0 inline-flex items-center gap-1 rounded-full bg-orange-100 px-2 py-1 text-xs font-bold text-orange-700"
+                            title={`${manutencoesPendentes} manutenção(ões) pendente(s)`}
+                          >
+                            🔧 {manutencoesPendentes}
+                          </span>
+                        )}
+                        <svg
+                          className={`w-5 h-5 shrink-0 text-slate-400 transition-transform ${aberta ? "rotate-180" : ""}`}
+                          fill="none"
+                          stroke="currentColor"
+                          viewBox="0 0 24 24"
+                          aria-hidden="true"
+                        >
+                          <path
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            strokeWidth={2}
+                            d="M19 9l-7 7-7-7"
+                          />
+                        </svg>
+                      </button>
+
+                      {aberta && (
+                        <form
+                          onSubmit={abrirConfirmacao}
+                          className="border-t border-slate-200 px-3 sm:px-4 py-4 space-y-4"
+                        >
+                          <div className="rounded-xl bg-slate-50 border border-slate-200 px-3 py-2">
+                            <div className="flex items-center justify-between gap-2 text-xs">
+                              <span className="font-semibold text-slate-700">
+                                {progresso.faltando.length === 0
+                                  ? "✅ Tudo preenchido, pode registrar"
+                                  : `Falta: ${progresso.faltando.join(", ")}`}
+                              </span>
+                              <span className="shrink-0 text-slate-500 tabular-nums">
+                                {progresso.feitos}/{progresso.total}
+                                {temRascunho && " · 💾 salvo"}
+                              </span>
+                            </div>
+                            <BarraProgresso
+                              feitos={progresso.feitos}
+                              total={progresso.total}
+                              className="mt-1.5"
+                            />
+                          </div>
+
+                          {concluidaEm && (
+                            <p className="rounded-lg bg-emerald-50 border border-emerald-200 px-3 py-2 text-xs text-emerald-800">
+                              ✓ Esta máquina já teve movimentação nas últimas{" "}
+                              {HORAS_MAQUINA_CONCLUIDA}h. Registrar de novo cria
+                              uma nova movimentação.
+                            </p>
+                          )}
+                          {manutencoesPendentes > 0 && (
+                            <p className="rounded-lg bg-orange-50 border border-orange-200 px-3 py-2 text-xs text-orange-800">
+                              🔧 {manutencoesPendentes} manutenção(ões)
+                              pendente(s) nesta máquina.{" "}
+                              <button
+                                type="button"
+                                onClick={() => navigate("/manutencoes")}
+                                className="font-semibold underline"
+                              >
+                                Ver manutenções
+                              </button>
+                            </p>
+                          )}
+
+                          <p className="text-xs text-slate-500">
+                            {!resumo?.dados && !resumo?.erro
+                              ? "Buscando a última movimentação..."
+                              : ultimaMov
+                                ? `Última movimentação: ${formatarDataHora(ultimaMov.dataColeta)} · IN ${ultimaMov.contadorIn ?? "-"} · OUT ${ultimaMov.contadorOut ?? "-"}`
+                                : resumo?.dados
+                                  ? "Primeira movimentação desta máquina."
+                                  : ""}
                           </p>
-                          <p className="text-xs text-yellow-700">
-                            Reconte por favor
+
+                          {/* Produto */}
+                          <div>
+                            <label
+                              htmlFor="campo-produto"
+                              className="block text-sm font-semibold text-gray-700 mb-1.5"
+                            >
+                              Produto *
+                            </label>
+                            <select
+                              id="campo-produto"
+                              name="produto_id"
+                              value={formData.produto_id}
+                              onChange={handleChange}
+                              className={`select-field ${formData.produto_id ? "border-blue-500 bg-blue-50" : ""}`}
+                            >
+                              <option value="">Escolha o produto</option>
+                              {produtos.map((produto) => (
+                                <option key={produto.id} value={produto.id}>
+                                  {produto.emoji || "🧸"} {produto.nome}
+                                </option>
+                              ))}
+                            </select>
+                            {formData.produto_id &&
+                              produtoSugeridoId[maquina.id] ===
+                                String(formData.produto_id) && (
+                                <p className="mt-1 text-[11px] text-blue-600">
+                                  ✨ Produto sugerido com base na última visita
+                                </p>
+                              )}
+                          </div>
+
+                          {/* Foto dos contadores */}
+                          <div className="p-3 bg-white border border-blue-100 rounded-xl">
+                            <p className="text-sm font-semibold text-gray-700 mb-2">
+                              Foto dos contadores (opcional)
+                            </p>
+                            <input
+                              id={`foto-contadores-${maquina.id}`}
+                              type="file"
+                              accept="image/*"
+                              capture="environment"
+                              onChange={handleFotoContadores}
+                              className="sr-only"
+                              disabled={lendoFoto}
+                            />
+                            <div className="flex flex-wrap items-center gap-2">
+                              <label
+                                htmlFor={`foto-contadores-${maquina.id}`}
+                                className={`inline-flex items-center gap-2 rounded-lg px-4 py-2 font-semibold text-white shadow ${
+                                  lendoFoto
+                                    ? "cursor-not-allowed bg-gray-400"
+                                    : "cursor-pointer bg-blue-600 hover:bg-blue-700"
+                                }`}
+                              >
+                                <span aria-hidden="true">📷</span>
+                                {lendoFoto
+                                  ? "Lendo foto..."
+                                  : foto
+                                    ? "Tirar outra foto"
+                                    : "Tirar foto e ler com IA"}
+                              </label>
+                              {foto && !lendoFoto && (
+                                <button
+                                  type="button"
+                                  onClick={() => trocarFoto(null)}
+                                  className="text-xs font-semibold text-slate-500 underline"
+                                >
+                                  Remover foto
+                                </button>
+                              )}
+                            </div>
+                            {fotoPreview && (
+                              <img
+                                src={fotoPreview}
+                                alt="Foto dos contadores"
+                                className="mt-3 max-h-48 rounded-lg border border-slate-200 object-contain"
+                              />
+                            )}
+                            {resultadoFoto && (
+                              <p className="mt-2 text-xs text-slate-600">
+                                {resultadoFoto}
+                              </p>
+                            )}
+                          </div>
+
+                          {/* Contadores */}
+                          <div className="grid grid-cols-2 gap-3">
+                            <CampoNumero
+                              label="Contador IN *"
+                              name="contadorIn"
+                              value={formData.contadorIn}
+                              onChange={handleChange}
+                              placeholder={
+                                ultimaMov?.contadorIn != null
+                                  ? `Último: ${ultimaMov.contadorIn}`
+                                  : "Ex: 1250"
+                              }
+                              ajuda={
+                                difIn !== null && difIn >= 0
+                                  ? `+${difIn} desde a última`
+                                  : null
+                              }
+                            />
+                            <CampoNumero
+                              label="Contador OUT *"
+                              name="contadorOut"
+                              value={formData.contadorOut}
+                              onChange={handleChange}
+                              placeholder={
+                                ultimaMov?.contadorOut != null
+                                  ? `Último: ${ultimaMov.contadorOut}`
+                                  : "Ex: 310"
+                              }
+                              ajuda={
+                                difOut !== null && difOut >= 0
+                                  ? `${difOut} prêmio(s) saíram`
+                                  : null
+                              }
+                            />
+                          </div>
+
+                          {avisosContadores.length > 0 && (
+                            <div className="rounded-xl border-2 border-amber-300 bg-amber-50 p-3 space-y-2">
+                              {avisosContadores.map((aviso) => (
+                                <p key={aviso} className="text-sm text-amber-900">
+                                  ⚠️ {aviso}.
+                                </p>
+                              ))}
+                              <label className="flex items-start gap-2 text-sm font-semibold text-amber-900">
+                                <input
+                                  type="checkbox"
+                                  checked={confirmacaoContadores}
+                                  onChange={(e) =>
+                                    setConfirmacaoContadores(e.target.checked)
+                                  }
+                                  className="mt-0.5 h-4 w-4"
+                                />
+                                Conferi e os contadores estão certos
+                              </label>
+                            </div>
+                          )}
+
+                          <CampoNumero
+                            label="Quanto abasteceu na máquina? *"
+                            name="quantidadeAdicionada"
+                            value={formData.quantidadeAdicionada}
+                            onChange={handleChange}
+                            placeholder="0"
+                            ajuda="Quantidade de produtos colocados agora (0 se não abasteceu)."
+                          />
+
+                          {/* Dinheiro */}
+                          <div className="rounded-xl border border-emerald-200 bg-emerald-50/50 p-3 space-y-3">
+                            <p className="text-sm font-bold text-emerald-900">
+                              💰 Dinheiro
+                            </p>
+                            <CampoNumero
+                              label="Dinheiro retirado da máquina *"
+                              name="dinheiroRetirado"
+                              value={formData.dinheiroRetirado}
+                              onChange={handleChange}
+                              placeholder="0,00"
+                              prefixo="R$"
+                              step="0.01"
+                              ajuda="Notas e moedas que você tirou agora (0 se não tirou)."
+                            />
+
+                            <div className="rounded-lg bg-white border border-emerald-100 p-3">
+                              <div className="flex items-start justify-between gap-3">
+                                <div>
+                                  <p className="text-sm font-semibold text-gray-700">
+                                    💳 Entrou na Machine Pay
+                                  </p>
+                                  {machinePayConfigurada && (
+                                    <p className="text-xs text-slate-500 mt-0.5">
+                                      {machinePay?.inicio
+                                        ? `De ${formatarDataHora(machinePay.inicio)} até agora`
+                                        : machinePay?.precisaDataInicio
+                                          ? "Escolha desde quando somar"
+                                          : "Desde a última movimentação até agora"}
+                                    </p>
+                                  )}
+                                </div>
+                                <p className="text-lg font-bold tabular-nums text-blue-700">
+                                  {!machinePayConfigurada
+                                    ? "—"
+                                    : resumo?.carregando
+                                      ? "..."
+                                      : valorMachinePay !== null
+                                        ? formatarReais(valorMachinePay)
+                                        : "—"}
+                                </p>
+                              </div>
+                              {!machinePayConfigurada ? (
+                                <p className="mt-1 text-xs text-slate-500">
+                                  Esta máquina não tem Machine Pay configurada
+                                  (cadastro da máquina).
+                                </p>
+                              ) : (
+                                <>
+                                  {(machinePay?.erro || resumo?.erro) && (
+                                    <p className="mt-1 text-xs text-red-600">
+                                      {machinePay?.erro || resumo.erro}
+                                    </p>
+                                  )}
+                                  <div className="mt-2 flex flex-col sm:flex-row sm:items-center gap-2">
+                                    <label
+                                      htmlFor="campo-machine-pay-inicio"
+                                      className="text-xs font-semibold text-slate-600 shrink-0"
+                                    >
+                                      Somar a partir de:
+                                    </label>
+                                    <input
+                                      id="campo-machine-pay-inicio"
+                                      type="datetime-local"
+                                      name="machinePayInicio"
+                                      value={
+                                        formData.machinePayInicio ||
+                                        (machinePay?.inicioPadrao
+                                          ? paraInputDataHora(
+                                              machinePay.inicioPadrao,
+                                            )
+                                          : "")
+                                      }
+                                      max={paraInputDataHora()}
+                                      onChange={handleChange}
+                                      className={`input-field text-sm ${
+                                        formData.machinePayInicio ||
+                                        machinePay?.precisaDataInicio
+                                          ? "border-amber-500 bg-amber-50"
+                                          : ""
+                                      }`}
+                                    />
+                                    {formData.machinePayInicio &&
+                                      machinePay?.inicioPadrao && (
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            atualizarCampos({
+                                              machinePayInicio: "",
+                                            })
+                                          }
+                                          className="text-xs font-semibold text-blue-600 whitespace-nowrap"
+                                        >
+                                          Voltar para a última movimentação
+                                        </button>
+                                      )}
+                                  </div>
+                                </>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Gastos extras */}
+                          <div className="rounded-xl border border-rose-200 bg-rose-50/40 p-3 space-y-2">
+                            <div className="flex items-center justify-between gap-2">
+                              <div>
+                                <p className="text-sm font-bold text-rose-900">
+                                  🧾 Gastos extras
+                                </p>
+                                <p className="text-xs text-rose-800/80">
+                                  Entram na Gestão de Contas como conta a pagar
+                                  já paga.
+                                </p>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={adicionarGasto}
+                                className="shrink-0 rounded-lg bg-rose-600 px-3 py-1.5 text-sm font-bold text-white hover:bg-rose-700"
+                              >
+                                + Gasto
+                              </button>
+                            </div>
+                            {(formData.gastos || []).length === 0 && (
+                              <p className="text-xs text-slate-500">
+                                Nenhum gasto extra nesta movimentação.
+                              </p>
+                            )}
+                            {(formData.gastos || []).map((gasto, indice) => (
+                              <div
+                                key={indice}
+                                className="grid grid-cols-[minmax(0,1fr)_7rem_auto] gap-2 items-center"
+                              >
+                                <input
+                                  type="text"
+                                  value={gasto.descricao}
+                                  onChange={(e) =>
+                                    alterarGasto(indice, "descricao", e.target.value)
+                                  }
+                                  placeholder="Ex: estacionamento, peça"
+                                  aria-label={`Descrição do gasto ${indice + 1}`}
+                                  className="input-field text-sm"
+                                  maxLength={200}
+                                />
+                                <input
+                                  type="number"
+                                  inputMode="decimal"
+                                  min="0"
+                                  step="0.01"
+                                  value={gasto.valor}
+                                  onChange={(e) =>
+                                    alterarGasto(indice, "valor", e.target.value)
+                                  }
+                                  placeholder="R$ 0,00"
+                                  aria-label={`Valor do gasto ${indice + 1}`}
+                                  className="input-field text-sm"
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() => removerGasto(indice)}
+                                  className="rounded-lg px-2 py-1 text-lg text-slate-400 hover:text-red-600"
+                                  aria-label={`Remover gasto ${indice + 1}`}
+                                >
+                                  ×
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+
+                          <div>
+                            <label
+                              htmlFor="campo-observacao"
+                              className="block text-sm font-semibold text-gray-700 mb-1.5"
+                            >
+                              Observação (opcional)
+                            </label>
+                            <textarea
+                              id="campo-observacao"
+                              name="observacao"
+                              value={formData.observacao}
+                              onChange={handleChange}
+                              rows={2}
+                              className="input-field"
+                              placeholder="Algo que o escritório precise saber"
+                            />
+                          </div>
+
+                          {/* Resumo */}
+                          <div className="rounded-xl bg-slate-50 border border-slate-200 p-3 space-y-1.5">
+                            <LinhaResumo
+                              label="Dinheiro retirado"
+                              valor={formatarReais(dinheiro)}
+                            />
+                            {machinePayConfigurada && (
+                              <LinhaResumo
+                                label="Machine Pay"
+                                valor={
+                                  valorMachinePay !== null
+                                    ? formatarReais(valorMachinePay)
+                                    : "—"
+                                }
+                              />
+                            )}
+                            {totalGastos > 0 && (
+                              <LinhaResumo
+                                label="Gastos extras"
+                                valor={`− ${formatarReais(totalGastos)}`}
+                                tom="text-rose-700"
+                              />
+                            )}
+                            <LinhaResumo
+                              label="Total líquido"
+                              valor={formatarReais(liquido)}
+                              forte
+                              tom={liquido < 0 ? "text-rose-700" : "text-emerald-700"}
+                            />
+                          </div>
+
+                          <div className="flex flex-col-reverse sm:flex-row gap-2 sm:justify-between">
+                            <div className="flex gap-2">
+                              <button
+                                type="button"
+                                onClick={() => selecionarMaquina(String(maquina.id))}
+                                className="btn-secondary"
+                              >
+                                Fechar
+                              </button>
+                              {temRascunho && (
+                                <button
+                                  type="button"
+                                  onClick={limparCamposMaquina}
+                                  className="px-3 py-2 text-sm font-semibold text-slate-500 hover:text-red-600"
+                                >
+                                  Limpar
+                                </button>
+                              )}
+                            </div>
+                            <button
+                              type="submit"
+                              disabled={salvando || lendoFoto}
+                              className="btn-primary disabled:opacity-60"
+                            >
+                              {salvando ? "Registrando..." : "Registrar movimentação"}
+                            </button>
+                          </div>
+                        </form>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {filtroLoja && (
+          <div className="card-gradient">
+            <h3 className="text-lg font-bold text-gray-900 mb-3">
+              Últimas movimentações
+              {lojaSelecionada ? ` — ${lojaSelecionada.nome}` : ""}
+            </h3>
+            {!dadosDaLojaAtual ? (
+              <p className="text-sm text-slate-500">Carregando...</p>
+            ) : historico.length === 0 ? (
+              <p className="text-sm text-slate-500">
+                Nenhuma movimentação registrada nesta loja ainda.
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {historico.map((mov) => {
+                  const dinheiroMov = Number(mov.valorEntradaNotas) || 0;
+                  const machinePayMov =
+                    mov.valorEntradaCartao !== null &&
+                    mov.valorEntradaCartao !== undefined
+                      ? Number(mov.valorEntradaCartao)
+                      : null;
+                  const gastosMov = Number(mov.valorGastosExtras) || 0;
+                  const produtoMov = mov.detalhesProdutos?.[0]?.produto?.nome;
+                  return (
+                    <div
+                      key={mov.id}
+                      className="rounded-xl border border-slate-200 bg-white px-3 py-2"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <p className="font-semibold text-slate-900 truncate">
+                            {mov.maquina?.nome || "Máquina"}
+                            {produtoMov && (
+                              <span className="font-normal text-slate-500">
+                                {" "}
+                                · {produtoMov}
+                              </span>
+                            )}
+                          </p>
+                          <p className="text-xs text-slate-500">
+                            {formatarDataHora(mov.dataColeta)} ·{" "}
+                            {mov.usuario?.nome || "-"}
                           </p>
                         </div>
+                        {ehAdmin && (
+                          <button
+                            type="button"
+                            onClick={() => setExcluindo(mov)}
+                            className="shrink-0 text-xs font-semibold text-red-600 hover:underline"
+                          >
+                            Excluir
+                          </button>
+                        )}
                       </div>
+                      <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-700 tabular-nums">
+                        <span>IN {mov.contadorIn ?? "-"}</span>
+                        <span>OUT {mov.contadorOut ?? "-"}</span>
+                        <span>Abastecido {mov.abastecidas ?? 0}</span>
+                        <span>💵 {formatarReais(dinheiroMov)}</span>
+                        {machinePayMov !== null && (
+                          <span>💳 {formatarReais(machinePayMov)}</span>
+                        )}
+                        {gastosMov > 0 && (
+                          <span className="text-rose-700">
+                            🧾 − {formatarReais(gastosMov)}
+                          </span>
+                        )}
+                      </div>
+                      {mov.observacoes && (
+                        <p className="mt-1 text-xs text-slate-500 italic">
+                          {mov.observacoes}
+                        </p>
+                      )}
                     </div>
-                  )}
-                </div>
-
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-2">
-                    📥 Quantidade Adicionada
-                  </label>
-                  <input
-                    type="number"
-                    name="quantidadeAdicionada"
-                    value={formData.quantidadeAdicionada}
-                    onChange={handleChange}
-                    className="input-field"
-                    placeholder="0"
-                    min="0"
-                  />
-                  <p className="text-xs text-gray-500 mt-1">
-                    Quantos produtos foram adicionados
-                  </p>
-                  {formData.quantidadeAdicionada &&
-                    formData.quantidadeAtualMaquina && (
-                      <p className="text-xs font-semibold text-green-600 mt-1">
-                        ✅ Novo total:{" "}
-                        {parseInt(formData.quantidadeAtualMaquina || 0) +
-                          parseInt(formData.quantidadeAdicionada || 0)}{" "}
-                        unidades
-                      </p>
-                    )}
-                </div>
-
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-2">
-                    🎫 Quantidade de Fichas
-                  </label>
-                  <input
-                    type="number"
-                    name="fichas"
-                    value={formData.fichas}
-                    onChange={handleChange}
-                    className="input-field"
-                    placeholder="0"
-                    min="0"
-                    disabled={formData.retiradaEstoque}
-                  />
-                  <p className="text-xs text-gray-500 mt-1">
-                    Fichas coletadas da máquina
-                  </p>
-                </div>
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-2">
-                    ❌ Retirada de Produto
-                  </label>
-                  <input
-                    type="number"
-                    name="retiradaProduto"
-                    value={formData.retiradaProduto}
-                    onChange={handleChange}
-                    className="input-field"
-                    placeholder="0"
-                    min="0"
-                  />
-                  <p className="text-xs text-gray-500 mt-1">
-                    Quantidade de produtos retirados (não conta como saída
-                    financeira)
-                  </p>
-                  <label className="flex items-center mt-2 gap-2">
-                    <input
-                      type="checkbox"
-                      name="retiradaProdutoDevolverEstoque"
-                      checked={formData.retiradaProdutoDevolverEstoque || false}
-                      onChange={handleChange}
-                      className="w-4 h-4 text-green-600 border-gray-300 rounded focus:ring-green-500"
-                    />
-                    <span className="text-xs text-green-700">
-                      Devolver retirada para o estoque da loja
-                    </span>
-                  </label>
-                </div>
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-2">
-                    💵 Valor em Notas (R$)
-                  </label>
-                  <input
-                    type="number"
-                    name="quantidade_notas_entrada"
-                    value={formData.quantidade_notas_entrada}
-                    onChange={handleChange}
-                    className="input-field"
-                    placeholder="0.00"
-                    min="0"
-                    step="0.01"
-                  />
-                  <p className="text-xs text-gray-500 mt-1">
-                    Valor total em dinheiro (notas) inserido na máquina
-                  </p>
-                </div>
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-2">
-                    💳 Valor Digital (Pix/Maquininha) (R$)
-                  </label>
-                  <input
-                    type="number"
-                    name="valor_entrada_maquininha_pix"
-                    value={formData.valor_entrada_maquininha_pix}
-                    onChange={handleChange}
-                    className="input-field"
-                    placeholder="0.00"
-                    min="0"
-                    step="0.01"
-                  />
-                  <p className="text-xs text-gray-500 mt-1">
-                    Valor total recebido via pagamento digital (Pix/Maquininha)
-                  </p>
-                </div>
+                  );
+                })}
               </div>
-
-              {/* Checkbox de Retirada de Estoque */}
-              <div className="p-4 bg-linear-to-r from-orange-50 to-yellow-50 border-2 border-orange-200 rounded-lg">
-                <label className="flex items-center gap-3 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    name="retiradaEstoque"
-                    checked={formData.retiradaEstoque}
-                    onChange={handleChange}
-                    className="w-5 h-5 text-orange-600 bg-gray-100 border-gray-300 rounded focus:ring-orange-500 focus:ring-2 cursor-pointer"
-                  />
-                  <div className="flex-1">
-                    <span className="text-sm font-bold text-orange-900">
-                      📦 Retirada de Estoque (não conta como dinheiro)
-                    </span>
-                    <p className="text-xs text-orange-700 mt-1">
-                      Marque esta opção quando estiver retirando produtos da
-                      máquina sem que seja uma venda (exemplo: produtos
-                      danificados, devolução, transferência). As fichas serão
-                      automaticamente zeradas.
-                    </p>
-                  </div>
-                </label>
-              </div>
-
-              <div className="flex items-start gap-2 pt-4 border-t border-gray-200 bg-amber-50 border border-amber-200 rounded-lg p-3">
-                <input
-                  type="checkbox"
-                  id="naoVaiRegistrar"
-                  checked={naoVaiRegistrar}
-                  onChange={(e) => {
-                    setNaoVaiRegistrar(e.target.checked);
-                    if (!e.target.checked) {
-                      setMostrarObsAlerta(false);
-                      setObsAlerta("");
-                    }
-                  }}
-                  className="mt-1"
-                />
-                <label htmlFor="naoVaiRegistrar" className="text-sm text-amber-900">
-                  Não vou registrar esta movimentação agora — só quero avisar
-                  pelo WhatsApp. (isso gera um alerta pra loja acompanhar)
-                </label>
-              </div>
-
-              {mostrarObsAlerta && (
-                <div className="border border-amber-300 bg-amber-50 rounded-lg p-4 space-y-2">
-                  <label className="block text-sm font-semibold text-amber-900">
-                    Por que você não vai registrar essa movimentação agora?
-                  </label>
-                  <textarea
-                    value={obsAlerta}
-                    onChange={(e) => setObsAlerta(e.target.value)}
-                    className="input-field"
-                    rows="2"
-                    placeholder="Explique o motivo (obrigatório)"
-                  />
-                  <div className="flex gap-2 justify-end">
-                    <button
-                      type="button"
-                      className="btn-secondary"
-                      onClick={() => setMostrarObsAlerta(false)}
-                      disabled={enviandoAlerta}
-                    >
-                      Voltar
-                    </button>
-                    <button
-                      type="button"
-                      className="px-4 py-2 bg-green-500 hover:bg-green-600 text-white font-semibold rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                      onClick={confirmarEnvioBypassWhatsapp}
-                      disabled={enviandoAlerta || !obsAlerta.trim()}
-                    >
-                      {enviandoAlerta
-                        ? "Enviando..."
-                        : "Confirmar e enviar para WhatsApp"}
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              <div className="flex flex-col sm:flex-row gap-3 sm:gap-4 sm:justify-end pt-4 border-t border-gray-200">
-                {error && (
-                  <AlertBox
-                    type="error"
-                    message={error}
-                    onClose={() => setError("")}
-                  />
-                )}
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowForm(false);
-                    setFiltroLojaForm("");
-                    limparFotoContadores();
-                    resetFluxoWhatsappBypass();
-                    setAlertaOrigemId(null);
-                  }}
-                  className="btn-secondary w-full sm:w-auto"
-                  disabled={salvandoMovimentacao}
-                >
-                  Cancelar
-                </button>
-                <button
-                  type="button"
-                  onClick={handleClickEnviarWhatsapp}
-                  className={`px-4 py-2 font-semibold rounded-lg transition-colors flex items-center justify-center gap-2 shadow w-full sm:w-auto ${
-                    naoVaiRegistrar
-                      ? "bg-green-500 hover:bg-green-600 text-white"
-                      : "bg-gray-300 text-gray-500 cursor-not-allowed"
-                  }`}
-                  disabled={salvandoMovimentacao || !naoVaiRegistrar}
-                  title={
-                    naoVaiRegistrar
-                      ? "Enviar aviso pelo WhatsApp sem registrar"
-                      : "Marque a caixa acima para liberar este botão"
-                  }
-                >
-                  <svg
-                    className="w-5 h-5"
-                    fill="currentColor"
-                    viewBox="0 0 24 24"
-                  >
-                    <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z" />
-                  </svg>
-                  Enviar para WhatsApp
-                </button>
-                <button
-                  type="submit"
-                  className="btn-primary w-full sm:w-auto"
-                  disabled={
-                    salvandoMovimentacao ||
-                    (contadorInSuspeito && !confirmacaoContadorIn) ||
-                    (contadorOutSuspeito && !confirmacaoContadorOut) ||
-                    (divergenciaMachinePaySuspeita &&
-                      !confirmacaoDivergenciaMachinePay)
-                  }
-                >
-                  {salvandoMovimentacao ? (
-                    <span className="flex items-center gap-2">
-                      <svg
-                        className="animate-spin h-5 w-5"
-                        fill="none"
-                        viewBox="0 0 24 24"
-                      >
-                        <circle
-                          className="opacity-25"
-                          cx="12"
-                          cy="12"
-                          r="10"
-                          stroke="currentColor"
-                          strokeWidth="4"
-                        />
-                        <path
-                          className="opacity-75"
-                          fill="currentColor"
-                          d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-                        />
-                      </svg>
-                      Salvando...
-                    </span>
-                  ) : (
-                    <span className="flex items-center gap-2">
-                      <svg
-                        className="w-5 h-5"
-                        fill="none"
-                        stroke="currentColor"
-                        viewBox="0 0 24 24"
-                      >
-                        <path
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          strokeWidth={2}
-                          d="M5 13l4 4L19 7"
-                        />
-                      </svg>
-                      Registrar Movimentação
-                    </span>
-                  )}
-                </button>
-              </div>
-            </form>
-          </div>
-        )}
-
-        {/* Histórico de Movimentações - Apenas para ADMIN */}
-        {usuario?.role === "ADMIN" && (
-          <div className="card-gradient">
-            <h3 className="text-lg font-bold text-gray-900 mb-4 flex items-center gap-2">
-              <span className="text-2xl">📋</span>
-              Histórico de Movimentações
-              {filtroLojaListagem && (
-                <span className="text-sm text-gray-600 font-normal">
-                  ({movimentacoesFiltradas.length} de {movimentacoes.length}{" "}
-                  registros)
-                </span>
-              )}
-            </h3>
-
-            {movimentacoesFiltradas.length > 0 ? (
-              <DataTable headers={columns} data={movimentacoesFiltradas} />
-            ) : (
-              <EmptyState
-                icon="🔄"
-                title={
-                  filtroLojaListagem
-                    ? "Nenhuma movimentação encontrada"
-                    : "Nenhuma movimentação registrada"
-                }
-                message={
-                  filtroLojaListagem
-                    ? "Não há movimentações para a loja selecionada."
-                    : "Registre sua primeira movimentação para começar o controle de estoque!"
-                }
-                action={{
-                  label: "Nova Movimentação",
-                  onClick: () => setShowForm(true),
-                }}
-              />
             )}
           </div>
         )}
-
-        {/* Seção Movimentações de Estoque de Loja - visível apenas para ADMIN */}
-        {usuario?.role === "ADMIN" && (
-          <div className="mt-12">
-            <h2 className="text-2xl font-bold mb-6 flex items-center gap-2">
-              <span className="text-3xl">🏪</span>
-              Movimentações de Estoque de Loja
-            </h2>
-            {/* Filtros */}
-            <div className="mb-5 rounded-2xl border border-gray-200 bg-white/80 backdrop-blur-sm shadow-sm p-4 md:p-5">
-              <div className="flex items-center justify-between gap-3 mb-4">
-                <h3 className="text-sm md:text-base font-bold text-gray-800 flex items-center gap-2">
-                  <span>🔎</span>
-                  Filtros
-                </h3>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setFiltroLojaEstoque("");
-                    setFiltroDataInicioEstoque("");
-                    setFiltroDataFimEstoque("");
-                    setFiltroResponsavelEstoque("");
-                  }}
-                  className="text-xs md:text-sm font-semibold text-blue-700 hover:text-blue-800 transition-colors"
-                >
-                  Limpar filtros
-                </button>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-2">
-                    Loja
-                  </label>
-                  <select
-                    className="input-field"
-                    value={filtroLojaEstoque}
-                    onChange={(e) => setFiltroLojaEstoque(e.target.value)}
-                  >
-                    <option value="">Todas as lojas</option>
-                    {lojas.map((loja) => (
-                      <option key={loja.id} value={loja.id}>
-                        {loja.nome}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-2">
-                    Data início
-                  </label>
-                  <input
-                    type="date"
-                    className="input-field"
-                    value={filtroDataInicioEstoque}
-                    onChange={(e) => setFiltroDataInicioEstoque(e.target.value)}
-                    aria-label="Data início"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-2">
-                    Data fim
-                  </label>
-                  <input
-                    type="date"
-                    className="input-field"
-                    value={filtroDataFimEstoque}
-                    onChange={(e) => setFiltroDataFimEstoque(e.target.value)}
-                    aria-label="Data fim"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-2">
-                    Responsável
-                  </label>
-                  <input
-                    type="text"
-                    className="input-field"
-                    placeholder="Digite o nome"
-                    value={filtroResponsavelEstoque}
-                    onChange={(e) =>
-                      setFiltroResponsavelEstoque(e.target.value)
-                    }
-                  />
-                </div>
-              </div>
-
-              <p className="text-xs text-gray-500 mt-3">
-                Sem selecionar datas, a tabela mostra automaticamente apenas os
-                registros de hoje.
-              </p>
-            </div>
-            <TabelaMovimentacoesEstoqueDeLoja
-              movimentacoesEstoqueLoja={movimentacoesEstoqueLoja}
-              lojas={lojas}
-              produtos={produtos}
-              filtroLojaEstoque={filtroLojaEstoque}
-              filtroDataInicioEstoque={filtroDataInicioEstoque}
-              filtroDataFimEstoque={filtroDataFimEstoque}
-              filtroResponsavelEstoque={filtroResponsavelEstoque}
-              setEditandoEstoqueLoja={setEditandoEstoqueLoja}
-              setExcluindoEstoqueLoja={setExcluindoEstoqueLoja}
-              onChangeEstoqueLoja={carregarDados}
-            />
-          </div>
-        )}
-
-        {/* Modal de Edição */}
-        {editandoMovimentacao && usuario?.role === "ADMIN" && (
-          <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
-            <div className="bg-white rounded-xl shadow-2xl max-w-md w-full p-6">
-              <div className="flex items-center justify-between mb-4">
-                <h3 className="text-xl font-bold text-gray-900 flex items-center gap-2">
-                  <span className="text-2xl">✏️</span>
-                  Editar Movimentação
-                </h3>
-                <button
-                  onClick={cancelarEdicao}
-                  className="text-gray-400 hover:text-gray-600 transition-colors"
-                >
-                  <svg
-                    className="w-6 h-6"
-                    fill="none"
-                    stroke="currentColor"
-                    viewBox="0 0 24 24"
-                  >
-                    <path
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      strokeWidth={2}
-                      d="M6 18L18 6M6 6l12 12"
-                    />
-                  </svg>
-                </button>
-              </div>
-
-              <div className="space-y-4">
-                <div className="p-3 bg-gray-50 rounded-lg">
-                  <p className="text-sm text-gray-600">
-                    <strong>Data:</strong>{" "}
-                    {new Date(
-                      editandoMovimentacao.dataColeta ||
-                        editandoMovimentacao.createdAt,
-                    ).toLocaleString("pt-BR")}
-                  </p>
-                  <p className="text-sm text-gray-600 mt-1">
-                    <strong>Máquina:</strong>{" "}
-                    {maquinas.find(
-                      (m) => m.id === editandoMovimentacao.maquinaId,
-                    )?.codigo || "N/A"}
-                  </p>
-                </div>
-
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-2">
-                    🎫 Quantidade de Fichas
-                  </label>
-                  <input
-                    type="number"
-                    min="0"
-                    value={formEdicao.fichas}
-                    onChange={(e) =>
-                      setFormEdicao({ ...formEdicao, fichas: e.target.value })
-                    }
-                    className="input-field"
-                    placeholder="0"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-2">
-                    📦 Quantidade Abastecida
-                  </label>
-                  <input
-                    type="number"
-                    min="0"
-                    value={formEdicao.abastecidas}
-                    onChange={(e) =>
-                      setFormEdicao({
-                        ...formEdicao,
-                        abastecidas: e.target.value,
-                      })
-                    }
-                    className="input-field"
-                    placeholder="0"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-2">
-                    💵 Quantidade de Notas
-                  </label>
-                  <input
-                    type="number"
-                    min="0"
-                    value={formEdicao.quantidade_notas_entrada}
-                    onChange={(e) =>
-                      setFormEdicao({
-                        ...formEdicao,
-                        quantidade_notas_entrada: e.target.value,
-                      })
-                    }
-                    className="input-field"
-                    placeholder="0"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-2">
-                    💳 Valor Digital (Pix/Maquininha) (R$)
-                  </label>
-                  <input
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    value={formEdicao.valor_entrada_maquininha_pix}
-                    onChange={(e) =>
-                      setFormEdicao({
-                        ...formEdicao,
-                        valor_entrada_maquininha_pix: e.target.value,
-                      })
-                    }
-                    className="input-field"
-                    placeholder="0.00"
-                  />
-                </div>
-                <div className="flex gap-3 pt-4">
-                  <button
-                    onClick={cancelarEdicao}
-                    className="flex-1 btn-secondary"
-                  >
-                    Cancelar
-                  </button>
-                  <button onClick={salvarEdicao} className="flex-1 btn-primary">
-                    Salvar Alterações
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
       </div>
-      {/* --- MODAL DE EXCLUSÃO DE ESTOQUE LOJA --- */}
-      {excluindoEstoqueLoja && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-xl shadow-2xl max-w-sm w-full p-6">
-            <div className="text-center">
-              <div className="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-red-100 mb-4">
-                <svg
-                  className="h-6 w-6 text-red-600"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                  stroke="currentColor"
-                >
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth="2"
-                    d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
-                  />
-                </svg>
-              </div>
-              <h3 className="text-lg font-medium text-gray-900">
-                Excluir Movimentação?
-              </h3>
-              <p className="text-sm text-gray-500 mt-2">
-                Tem certeza que deseja excluir esta movimentação de estoque da
-                loja? Esta ação não pode ser desfeita.
+
+      {/* Confirmação do registro */}
+      {mostrarConfirmacao && maquinaSelecionada && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-md rounded-2xl bg-white p-5 shadow-xl">
+            <h3 className="text-lg font-bold text-slate-900">
+              Confirmar movimentação
+            </h3>
+            <div className="mt-3 space-y-1 text-sm text-slate-700">
+              <p>
+                <strong>Loja:</strong> {lojaSelecionada?.nome || "-"}
               </p>
-              <div className="mt-6 flex justify-center gap-3">
-                <button
-                  onClick={() => setExcluindoEstoqueLoja(null)}
-                  className="btn-secondary"
-                >
-                  Cancelar
-                </button>
-                <button onClick={confirmarExclusaoLoja} className="btn-danger">
-                  Sim, Excluir
-                </button>
-              </div>
+              <p>
+                <strong>Máquina:</strong> {maquinaSelecionada.nome}
+              </p>
+              <p>
+                <strong>Produto:</strong> {produtoSelecionado?.nome || "-"}
+              </p>
+              <p>
+                <strong>Contadores:</strong> IN {formData.contadorIn} · OUT{" "}
+                {formData.contadorOut}
+              </p>
+              <p>
+                <strong>Abastecido:</strong>{" "}
+                {numero(formData.quantidadeAdicionada)}
+              </p>
+              <p>
+                <strong>Dinheiro retirado:</strong> {formatarReais(dinheiro)}
+              </p>
+              {machinePayConfigurada && (
+                <p>
+                  <strong>Machine Pay:</strong>{" "}
+                  {valorMachinePay !== null
+                    ? formatarReais(valorMachinePay)
+                    : "não consultado"}
+                  {machinePay?.inicio &&
+                    ` (desde ${formatarDataHora(machinePay.inicio)})`}
+                </p>
+              )}
+              {gastosOk.length > 0 && (
+                <div>
+                  <strong>
+                    Gastos extras (vão para a Gestão de Contas como pagos):
+                  </strong>
+                  <ul className="ml-4 list-disc">
+                    {gastosOk.map((g, i) => (
+                      <li key={i}>
+                        {g.descricao.trim()}: {formatarReais(numero(g.valor))}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              <p className="pt-1 text-base font-bold text-emerald-700">
+                Total líquido: {formatarReais(liquido)}
+              </p>
+            </div>
+            <p className="mt-3 text-xs text-slate-500">
+              Depois de registrar, a mensagem abre no WhatsApp.
+            </p>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => setMostrarConfirmacao(false)}
+                disabled={salvando}
+              >
+                Voltar
+              </button>
+              <button
+                type="button"
+                className="btn-primary disabled:opacity-60"
+                onClick={registrar}
+                disabled={salvando}
+              >
+                {salvando ? "Registrando..." : "Registrar"}
+              </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* --- MODAL DE EDIÇÃO DE ESTOQUE LOJA --- */}
-      {editandoEstoqueLoja && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-xl shadow-2xl max-w-md w-full p-6">
-            <h3 className="text-xl font-bold text-gray-900 mb-4">
-              ✏️ Editar Produtos Enviados
+      {excluindo && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-sm rounded-2xl bg-white p-5 shadow-xl">
+            <h3 className="text-lg font-bold text-slate-900">
+              Excluir movimentação?
             </h3>
-            <form onSubmit={salvarEdicaoLoja}>
-              <div className="p-3 bg-gray-50 rounded mb-4">
-                <p className="text-xs text-gray-500">
-                  Data:{" "}
-                  {editandoEstoqueLoja.data
-                    ? new Date(editandoEstoqueLoja.data).toLocaleString("pt-BR")
-                    : "-"}
-                </p>
-              </div>
-              <div className="mb-4">
-                <label className="block text-sm font-semibold text-gray-700 mb-2">
-                  Produtos Enviados
-                </label>
-                {editandoEstoqueLoja.produtosEnviados &&
-                editandoEstoqueLoja.produtosEnviados.length > 0 ? (
-                  editandoEstoqueLoja.produtosEnviados.map((prod, idx) => (
-                    <div
-                      key={prod.id || idx}
-                      className="flex gap-2 mb-2 items-center"
-                    >
-                      <span className="min-w-30">
-                        {prod.produto?.nome || prod.produtoId}
-                      </span>
-                      <input
-                        type="number"
-                        min="0"
-                        value={prod.quantidade}
-                        onChange={(e) => {
-                          const novaLista =
-                            editandoEstoqueLoja.produtosEnviados.map((p, i) =>
-                              i === idx
-                                ? { ...p, quantidade: e.target.value }
-                                : p,
-                            );
-                          setEditandoEstoqueLoja({
-                            ...editandoEstoqueLoja,
-                            produtosEnviados: novaLista,
-                          });
-                        }}
-                        className="input-field w-24"
-                      />
-                      <select
-                        value={prod.tipoMovimentacao}
-                        onChange={(e) => {
-                          const novaLista =
-                            editandoEstoqueLoja.produtosEnviados.map((p, i) =>
-                              i === idx
-                                ? { ...p, tipoMovimentacao: e.target.value }
-                                : p,
-                            );
-                          setEditandoEstoqueLoja({
-                            ...editandoEstoqueLoja,
-                            produtosEnviados: novaLista,
-                          });
-                        }}
-                        className="input-field w-28"
-                      >
-                        <option value="entrada">Entrada</option>
-                        <option value="saida">Saída</option>
-                      </select>
-                    </div>
-                  ))
-                ) : (
-                  <span className="text-gray-500">Nenhum produto enviado</span>
-                )}
-              </div>
-              <div className="flex gap-3 justify-end mt-6">
-                <button
-                  type="button"
-                  onClick={() => setEditandoEstoqueLoja(null)}
-                  className="btn-secondary"
-                >
-                  Cancelar
-                </button>
-                <button type="submit" className="btn-primary">
-                  Salvar
-                </button>
-              </div>
-            </form>
+            <p className="mt-2 text-sm text-slate-600">
+              {excluindo.maquina?.nome || "Máquina"} —{" "}
+              {formatarDataHora(excluindo.dataColeta)}. Os gastos extras
+              lançados nela também saem da Gestão de Contas.
+            </p>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => setExcluindo(null)}
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                className="btn-danger"
+                onClick={excluirMovimentacao}
+              >
+                Excluir
+              </button>
+            </div>
           </div>
         </div>
       )}
-
-      <ConfirmDialog
-        isOpen={mostrarConfirmacaoMovimentacao}
-        onClose={() => setMostrarConfirmacaoMovimentacao(false)}
-        onConfirm={confirmarRegistroMovimentacao}
-        title="Confirmar Movimentação"
-        message={resumoConfirmacaoMovimentacao}
-        confirmText="Sim, registrar"
-        cancelText="Revisar"
-        type="primary"
-      />
 
       <Footer />
     </div>
   );
 }
+
+export default Movimentacoes;

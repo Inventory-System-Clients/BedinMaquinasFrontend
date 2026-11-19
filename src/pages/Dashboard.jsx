@@ -1,6 +1,6 @@
 // ...existing code...
 import { useState, useEffect, useCallback, lazy, Suspense } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link } from "react-router-dom";
 import { Icone, Parallax, Reveal } from "../components/dashboard/fx";
 import { KpiCard, KpiDestaque, OpCard, SecaoCabecalho } from "../components/dashboard/Cards";
 import "../components/dashboard/dashboard.css";
@@ -310,7 +310,6 @@ export function Dashboard() {
     loading: true,
   });
   const [roteirosHoje, setRoteirosHoje] = useState([]);
-  const navigate = useNavigate();
   // Feedback visual do botão Atualizar (os dados vêm do mesmo carregarDados).
   const [atualizando, setAtualizando] = useState(false);
   const [versaoDados, setVersaoDados] = useState(0);
@@ -325,7 +324,8 @@ export function Dashboard() {
   const [vendasPorProduto, setVendasPorProduto] = useState([]);
   const [dataInicio, setDataInicio] = useState("");
   const [dataFim, setDataFim] = useState("");
-  const [alertasEstoqueLoja, setAlertasEstoqueLoja] = useState([]);
+  // Sem controle de estoque nas lojas: sempre vazio (a seção some do painel).
+  const alertasEstoqueLoja = [];
   
   // Estados para gastos de roteiro
   const [gastosRoteiro, setGastosRoteiro] = useState([]);
@@ -364,15 +364,12 @@ export function Dashboard() {
 
       setLojas(lojasRes.data || []);
       setMaquinas(maquinasRes.data || []);
-
-      // Carregar alertas de estoque de lojas quando as lojas forem carregadas
-      if (lojasRes.data && lojasRes.data.length > 0 && alertasEstoqueLoja.length === 0) {
-        carregarAlertasEstoqueLoja(lojasRes.data);
-      }
+      // Sem controle de estoque nas lojas: os alertas de estoque de loja não
+      // são mais carregados (alertasEstoqueLoja fica vazio).
     } finally {
       setLoadingBuscaLojasMaquinas(false);
     }
-  }, [lojas.length, maquinas.length, alertasEstoqueLoja.length]);
+  }, [lojas.length, maquinas.length]);
 
   const abrirBuscaLojasMaquinas = async () => {
     setMostrarBuscaLojasMaquinas(true);
@@ -468,49 +465,6 @@ export function Dashboard() {
     } finally {
       setAtualizando(false);
       setVersaoDados((v) => v + 1);
-    }
-  };
-
-  const carregarAlertasEstoqueLoja = async (lojasData) => {
-    try {
-      // Buscar alertas de todas as lojas
-      const alertasPromises = lojasData.map((loja) =>
-        api
-          .get(`/estoque-lojas/${loja.id}/alertas`)
-          .then((res) => ({
-            lojaId: loja.id,
-            lojaNome: loja.nome,
-            alertas: res.data || [],
-          }))
-          .catch((err) => {
-            console.error(
-              `Erro ao carregar alertas da loja ${loja.nome}:`,
-              err.message
-            );
-            return { lojaId: loja.id, lojaNome: loja.nome, alertas: [] };
-          })
-      );
-
-      const alertasTodasLojas = await Promise.all(alertasPromises);
-
-      // Agrupar todos os alertas
-      const todosAlertas = alertasTodasLojas.flatMap((lojaAlertas) => {
-        // Garantir que alertas seja um array
-        const alertasArray = Array.isArray(lojaAlertas.alertas)
-          ? lojaAlertas.alertas
-          : [];
-
-        return alertasArray.map((alerta) => ({
-          ...alerta,
-          lojaNome: lojaAlertas.lojaNome,
-        }));
-      });
-
-      setAlertasEstoqueLoja(todosAlertas);
-      console.log("Alertas de estoque de lojas:", todosAlertas);
-    } catch (error) {
-      console.error("Erro ao carregar alertas de estoque de lojas:", error);
-      setAlertasEstoqueLoja([]);
     }
   };
 
@@ -1832,23 +1786,20 @@ export function Dashboard() {
                   <OpCard
                     icone={nivelAlertas === "ok" ? "check" : "alert"}
                     tom={nivelAlertas === "crit" ? "vermelho" : nivelAlertas === "warn" ? "laranja" : "verde"}
-                    titulo="Alertas de Estoque"
+                    titulo="Máquinas para abastecer"
                     valor={totalAlertas}
                     sutil={nivelAlertas === "ok"}
                     destaque={nivelAlertas === "crit"}
                     descricao={
                       totalAlertas === 0
                         ? "Nenhum alerta no momento"
-                        : `${stats.alertas.length} máquina${stats.alertas.length === 1 ? "" : "s"} · ${alertasEstoqueLoja.length} loja${alertasEstoqueLoja.length === 1 ? "" : "s"}`
+                        : `${stats.alertas.length} máquina${stats.alertas.length === 1 ? "" : "s"} abaixo do nível`
                     }
-                    acao={stats.alertas.length > 0 ? "Ver alertas" : "Abrir alertas de estoque"}
+                    acao={stats.alertas.length > 0 ? "Ver alertas" : "Tudo em dia"}
                     onClick={() => {
-                      const alertSection = document.getElementById("alertas-estoque-maquinas");
-                      if (alertSection) {
-                        alertSection.scrollIntoView({ behavior: "smooth" });
-                      } else {
-                        navigate("/alertas-estoque");
-                      }
+                      document
+                        .getElementById("alertas-estoque-maquinas")
+                        ?.scrollIntoView({ behavior: "smooth" });
                     }}
                   >
                     {nivelAlertas === "crit" && (
@@ -2484,7 +2435,7 @@ export function Dashboard() {
             <SecaoCabecalho
               icone="alert"
               tom={temAlertaCritico ? "vermelho" : "laranja"}
-              titulo="Alertas de Estoque em Máquinas"
+              titulo="Máquinas para abastecer"
               descricao="Máquinas abaixo do nível de estoque esperado"
             >
               <span className="inline-flex items-center gap-1.5 rounded-full bg-red-50 px-3 py-1 text-sm font-semibold text-red-700 ring-1 ring-red-200">
