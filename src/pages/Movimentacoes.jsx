@@ -6,11 +6,6 @@ import { Footer } from "../components/Footer";
 import { PageHeader, AlertBox } from "../components/UIComponents";
 import { PageLoader } from "../components/Loading";
 import { useAuth } from "../contexts/AuthContext";
-import {
-  salvarFotoUltimaMovimentacao,
-  obterFotoUltimaMovimentacao,
-  limparFotoUltimaMovimentacao,
-} from "../services/fotoUltimaMovimentacaoDb";
 
 // Tela de Movimentações no formato da AgarraMais: escolhe a loja, aparecem as
 // máquinas dela com uma barrinha de andamento, e cada máquina guarda o que já
@@ -22,7 +17,6 @@ import {
 // dinheiro e os gastos extras; o que entrou na Machine Pay é somado sozinho
 // (da última movimentação até agora, ou a partir da data que ele escolher).
 
-const CHAVE_ULTIMA_MENSAGEM_WHATSAPP = "ultimaMensagemMovimentacaoWhatsapp";
 const CHAVE_RASCUNHOS = "rascunhosMovimentacaoBedin";
 // Conta a partir da última alteração na máquina.
 const VALIDADE_RASCUNHO_MS = 3 * 60 * 60 * 1000;
@@ -358,13 +352,11 @@ export function Movimentacoes() {
   const [lendoFoto, setLendoFoto] = useState(false);
   const [resultadoFoto, setResultadoFoto] = useState("");
 
-  const [temMensagemSalva, setTemMensagemSalva] = useState(() => {
-    try {
-      return !!localStorage.getItem(CHAVE_ULTIMA_MENSAGEM_WHATSAPP);
-    } catch {
-      return false;
-    }
-  });
+  // "Nova movimentação" (Dashboard) chega com ?nova=true: rola até a escolha da loja.
+  const escolhaLojaRef = useRef(null);
+  const [rolarParaLoja] = useState(
+    () => new URLSearchParams(location.search).get("nova") === "true",
+  );
 
   // Vindo de um alerta (Manutenções → "Lançar movimentação"): abre a máquina
   // já preenchida.
@@ -428,6 +420,14 @@ export function Movimentacoes() {
     // Só na abertura da página.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    if (loading || !rolarParaLoja) return;
+    const alvo = escolhaLojaRef.current;
+    if (!alvo) return;
+    alvo.scrollIntoView({ behavior: "smooth", block: "start" });
+    alvo.querySelector("select")?.focus({ preventScroll: true });
+  }, [loading, rolarParaLoja]);
 
   useEffect(() => {
     if (!filtroLoja) return;
@@ -709,31 +709,6 @@ export function Movimentacoes() {
       gastos: formData.gastos.filter((_, i) => i !== indice),
     });
 
-  const enviarUltimaMensagemSalva = async () => {
-    const janela = abrirJanelaWhatsapp();
-    let mensagem = null;
-    try {
-      mensagem = localStorage.getItem(CHAVE_ULTIMA_MENSAGEM_WHATSAPP);
-    } catch {
-      mensagem = null;
-    }
-    if (!mensagem) {
-      if (janela && !janela.closed) janela.close();
-      setError("Nenhuma mensagem de movimentação salva para reenviar.");
-      return;
-    }
-    const fotoSalva = await obterFotoUltimaMovimentacao().catch(() => null);
-    await compartilharOuAbrir({
-      mensagem,
-      foto: fotoSalva,
-      janela,
-      onAvisoFoto: () =>
-        setError(
-          "Este navegador não anexa a foto sozinho. A mensagem foi aberta; anexe a foto na conversa.",
-        ),
-    });
-  };
-
   if (loading) return <PageLoader />;
 
   // --- Derivados ---
@@ -922,18 +897,6 @@ export function Movimentacoes() {
       }
 
       const mensagem = montarMensagem();
-      try {
-        localStorage.setItem(CHAVE_ULTIMA_MENSAGEM_WHATSAPP, mensagem);
-        setTemMensagemSalva(true);
-      } catch {
-        // Sem localStorage: só não dá pra reenviar depois.
-      }
-      try {
-        if (foto) await salvarFotoUltimaMovimentacao(foto);
-        else await limparFotoUltimaMovimentacao();
-      } catch (erroFoto) {
-        console.error("Erro ao guardar a foto da última movimentação:", erroFoto);
-      }
 
       const fotoEnvio = foto;
       const nomeMaquina = maquinaSelecionada?.nome || "máquina";
@@ -991,33 +954,13 @@ export function Movimentacoes() {
       <Navbar />
 
       <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 mb-6">
+        <div className="mb-6">
           <PageHeader
             title="Movimentações"
             subtitle="Escolha a loja e vá registrando as máquinas"
             icon="🔄"
             action={null}
           />
-          <div className="flex flex-wrap gap-3">
-            <button
-              className="px-5 py-2 bg-rose-600 text-white rounded hover:bg-rose-700 font-bold shadow"
-              onClick={() => navigate("/sangrias")}
-            >
-              Sangria
-            </button>
-            <button
-              className="px-5 py-2 bg-gray-700 text-white rounded hover:bg-gray-800 font-bold shadow disabled:opacity-50 disabled:cursor-not-allowed"
-              onClick={enviarUltimaMensagemSalva}
-              disabled={!temMensagemSalva}
-              title={
-                temMensagemSalva
-                  ? "Reenviar a mensagem da última movimentação"
-                  : "Nenhuma mensagem salva ainda"
-              }
-            >
-              Enviar Última Mensagem
-            </button>
-          </div>
         </div>
 
         {error && (
@@ -1031,7 +974,7 @@ export function Movimentacoes() {
           />
         )}
 
-        <div className="card-gradient mb-6">
+        <div ref={escolhaLojaRef} className="card-gradient mb-6 scroll-mt-4">
           <label
             htmlFor="loja-atual"
             className="block text-sm font-semibold text-gray-700 mb-2"
